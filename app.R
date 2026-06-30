@@ -3,11 +3,11 @@ library(ggplot2)
 library(scales)
 
 quintil_labels <- c(
-  "F1\nmenor renda",
-  "F2",
-  "F3",
-  "F4",
-  "F5\nmaior renda"
+  "Q1",
+  "Q2",
+  "Q3",
+  "Q4",
+  "Q5"
 )
 
 quintil_plot_labels <- c(
@@ -16,18 +16,6 @@ quintil_plot_labels <- c(
   "Q3",
   "Q4",
   "Q5\nmaior renda"
-)
-
-money_columns <- c(
-  "Renda mensal",
-  "Renda per capita",
-  "Alimentacao",
-  "Moradia",
-  "Transporte",
-  "Saude",
-  "Educacao",
-  "Gasto essencial",
-  "Folga financeira"
 )
 
 required_columns <- c(
@@ -42,17 +30,18 @@ required_columns <- c(
   "Total Number of Family members"
 )
 
-indicator_choices <- c(
-  "Comprometimento da renda" = "Comprometimento",
-  "Renda mensal domiciliar" = "Renda",
-  "Renda per capita" = "RendaPerCapita",
-  "Folga financeira" = "FolgaFinanceira",
-  "Gasto essencial" = "GastoEssencial",
-  "Alimentacao" = "Alimentacao",
-  "Moradia" = "Moradia",
-  "Transporte" = "Transporte",
-  "Saude" = "Saude",
-  "Educacao" = "Educacao"
+transform_choices <- c(
+  "Sem transformacao" = "raw",
+  "Logaritmica: log1p(y)" = "log1p",
+  "Box-Cox aproximada" = "boxcox"
+)
+
+quintil_colors <- c(
+  "Q1" = "#d95f4f",
+  "Q2" = "#f2a541",
+  "Q3" = "#e3c74f",
+  "Q4" = "#4fb286",
+  "Q5" = "#4f79d8"
 )
 
 locate_income_file <- function() {
@@ -73,1141 +62,1202 @@ locate_income_file <- function() {
   candidates[1]
 }
 
+safe_numeric <- function(x) {
+  if (is.numeric(x)) {
+    return(x)
+  }
+
+  as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", as.character(x))))
+}
+
+format_number_br <- function(x, digits = 0) {
+  ifelse(
+    is.na(x) | !is.finite(x),
+    "NA",
+    formatC(x, format = "f", digits = digits, big.mark = ".", decimal.mark = ",")
+  )
+}
+
+format_brl <- function(x, digits = 2) {
+  paste0("R$ ", format_number_br(x, digits))
+}
+
+format_pct <- function(x, digits = 1) {
+  ifelse(
+    is.na(x) | !is.finite(x),
+    "NA",
+    paste0(format_number_br(100 * x, digits), "%")
+  )
+}
+
+format_pvalue <- function(p) {
+  if (is.na(p) || !is.finite(p)) {
+    return("NA")
+  }
+  if (p < 0.001) {
+    return("< 0,001")
+  }
+  format_number_br(p, 3)
+}
+
+format_lambda <- function(lambda) {
+  if (is.na(lambda) || !is.finite(lambda)) {
+    return("-")
+  }
+  format_number_br(lambda, 2)
+}
+
 quintil_scale_x <- function() {
   scale_x_discrete(labels = setNames(quintil_plot_labels, quintil_labels))
 }
 
-safe_numeric <- function(x) {
-  suppressWarnings(as.numeric(x))
+build_quintiles <- function(values) {
+  groups <- rep(NA_character_, length(values))
+  valid <- which(!is.na(values) & is.finite(values))
+
+  if (length(valid) == 0) {
+    return(factor(groups, levels = quintil_labels, ordered = TRUE))
+  }
+
+  ordered_index <- valid[order(values[valid], seq_along(valid))]
+  group_index <- ceiling(seq_along(ordered_index) * length(quintil_labels) / length(ordered_index))
+  group_index <- pmin(group_index, length(quintil_labels))
+  groups[ordered_index] <- quintil_labels[group_index]
+
+  factor(groups, levels = quintil_labels, ordered = TRUE)
 }
 
-format_brl <- function(x) {
-  ifelse(
-    is.na(x),
-    "NA",
-    paste0(
-      "R$ ",
-      formatC(x, format = "f", digits = 2, big.mark = ".", decimal.mark = ",")
-    )
+prepare_dataset <- function(raw_data, taxa_cambio) {
+  taxa_cambio <- ifelse(is.na(taxa_cambio) || taxa_cambio <= 0, 0.09, taxa_cambio)
+
+  renda <- safe_numeric(raw_data[["Total Household Income"]]) * taxa_cambio / 12
+  alimentacao <- safe_numeric(raw_data[["Total Food Expenditure"]]) * taxa_cambio / 12
+  moradia <- safe_numeric(raw_data[["Housing and water Expenditure"]]) * taxa_cambio / 12
+  transporte <- safe_numeric(raw_data[["Transportation Expenditure"]]) * taxa_cambio / 12
+  saude <- safe_numeric(raw_data[["Medical Care Expenditure"]]) * taxa_cambio / 12
+  educacao <- safe_numeric(raw_data[["Education Expenditure"]]) * taxa_cambio / 12
+  tamanho_familia <- pmax(1, safe_numeric(raw_data[["Total Number of Family members"]]))
+
+  data <- data.frame(
+    Regiao = as.character(raw_data[["Region"]]),
+    FonteRenda = as.character(raw_data[["Main Source of Income"]]),
+    TamanhoFamilia = tamanho_familia,
+    Renda = renda,
+    RendaPerCapita = renda / tamanho_familia,
+    Alimentacao = alimentacao,
+    Moradia = moradia,
+    Transporte = transporte,
+    Saude = saude,
+    Educacao = educacao,
+    stringsAsFactors = FALSE
   )
-}
 
-format_pct <- function(x) {
-  ifelse(
-    is.na(x),
-    "NA",
-    paste0(formatC(100 * x, format = "f", digits = 1, decimal.mark = ","), "%")
+  data$GastoEssencial <- rowSums(
+    data[, c("Alimentacao", "Moradia", "Transporte", "Saude", "Educacao")],
+    na.rm = TRUE
   )
+  data$Comprometimento <- ifelse(data$Renda > 0, data$GastoEssencial / data$Renda, NA)
+  data$FolgaFinanceira <- data$Renda - data$GastoEssencial
+
+  data <- data[
+    is.finite(data$Renda) &
+      is.finite(data$Comprometimento) &
+      !is.na(data$Regiao) &
+      !is.na(data$FonteRenda),
+  ]
+
+  data$QuintilBaseCompleta <- build_quintiles(data$Renda)
+  data
 }
 
-calc_stat <- function(x, stat) {
+safe_skewness <- function(x) {
   x <- x[is.finite(x)]
-
-  if (length(x) == 0) {
+  if (length(x) < 3 || sd(x) == 0) {
     return(NA_real_)
   }
-
-  switch(
-    stat,
-    mean = mean(x),
-    median = median(x),
-    sd = if (length(x) > 1) sd(x) else 0,
-    iqr = IQR(x),
-    mean(x)
-  )
+  mean(((x - mean(x)) / sd(x))^3)
 }
 
-stat_label <- function(stat) {
-  switch(
-    stat,
-    mean = "Media",
-    median = "Mediana",
-    sd = "Desvio-padrao",
-    iqr = "IQR",
-    "Media"
-  )
-}
-
-indicator_label <- function(variable_name) {
-  switch(
-    variable_name,
-    Comprometimento = "Comprometimento da renda",
-    Renda = "Renda mensal domiciliar",
-    RendaPerCapita = "Renda per capita",
-    FolgaFinanceira = "Folga financeira",
-    GastoEssencial = "Gasto essencial",
-    Alimentacao = "Alimentacao",
-    Moradia = "Moradia",
-    Transporte = "Transporte",
-    Saude = "Saude",
-    Educacao = "Educacao",
-    variable_name
-  )
-}
-
-is_percent_indicator <- function(variable_name) {
-  identical(variable_name, "Comprometimento")
-}
-
-format_indicator_value <- function(x, variable_name) {
-  if (is_percent_indicator(variable_name)) {
-    format_pct(x)
-  } else {
-    format_brl(x)
+boxcox_transform <- function(y, lambda) {
+  if (abs(lambda) < 1e-8) {
+    return(log(y))
   }
+  (y^lambda - 1) / lambda
 }
 
-quintil_colors <- function(theme_mode) {
-  if (identical(theme_mode, "Escuro")) {
-    return(c("#F87171", "#FB923C", "#FACC15", "#4ADE80", "#60A5FA"))
+choose_boxcox_lambda <- function(y, group) {
+  valid <- is.finite(y) & !is.na(group)
+  y <- y[valid]
+  group <- droplevels(as.factor(group[valid]))
+
+  if (length(y) < 10 || length(unique(group)) < 2) {
+    return(list(lambda = 0, shift = 0))
   }
 
-  c("#EF4444", "#F97316", "#F59E0B", "#10B981", "#3B82F6")
-}
+  shift <- ifelse(min(y, na.rm = TRUE) <= 0, abs(min(y, na.rm = TRUE)) + 1e-6, 0)
+  positive_y <- y + shift
+  lambda_grid <- seq(-2, 2, by = 0.05)
 
-axis_scale_for <- function(variable_name, axis = "y") {
-  if (is_percent_indicator(variable_name)) {
-    if (identical(axis, "x")) {
-      scale_x_continuous(labels = percent_format(accuracy = 1))
-    } else {
-      scale_y_continuous(labels = percent_format(accuracy = 1))
+  scores <- sapply(lambda_grid, function(lambda) {
+    transformed <- boxcox_transform(positive_y, lambda)
+    fit <- tryCatch(lm(transformed ~ group), error = function(error) NULL)
+    if (is.null(fit)) {
+      return(Inf)
     }
-  } else {
-    if (identical(axis, "x")) {
-      scale_x_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-    } else {
-      scale_y_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-    }
-  }
+    skew <- safe_skewness(residuals(fit))
+    ifelse(is.na(skew), Inf, abs(skew))
+  })
+
+  best <- lambda_grid[which.min(scores)]
+  list(lambda = best, shift = shift)
 }
 
-safe_ratio <- function(numerator, denominator) {
-  if (!is.finite(numerator) || !is.finite(denominator) || denominator == 0) {
-    return(NA_real_)
-  }
-
-  numerator / denominator
-}
-
-has_variation <- function(x) {
-  x <- x[is.finite(x)]
-  length(unique(x)) > 1
-}
-
-empty_plot <- function(title, subtitle, theme_mode, x = NULL, y = NULL) {
-  pal <- plot_palette(theme_mode)
-
-  ggplot() +
-    annotate(
-      "text",
-      x = 0.5,
-      y = 0.55,
-      label = subtitle,
-      colour = pal$text,
-      size = 5.1,
-      lineheight = 1.2
-    ) +
-    labs(title = title, x = x, y = y) +
-    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
-    plot_theme(theme_mode) +
-    theme(
-      axis.text = element_blank(),
-      axis.ticks = element_blank(),
-      panel.grid = element_blank()
-    )
-}
-
-slider_step_for <- function(min_value, max_value, variable_name) {
-  if (is_percent_indicator(variable_name)) {
-    return(0.01)
-  }
-
-  span <- max_value - min_value
-
-  if (!is.finite(span) || span <= 0) {
-    return(1)
-  }
-
-  if (span <= 10) {
-    return(0.1)
-  }
-
-  if (span <= 50) {
-    return(0.5)
-  }
-
-  if (span <= 200) {
-    return(1)
-  }
-
-  if (span <= 1000) {
-    return(5)
-  }
-
-  if (span <= 5000) {
-    return(10)
-  }
-
-  max(signif(span / 100, 1), 1)
-}
-
-round_to_step <- function(value, step_value) {
-  if (!is.finite(step_value) || step_value <= 0) {
-    return(value)
-  }
-
-  round(value / step_value) * step_value
-}
-
-compute_probability_stats <- function(values, operator, threshold) {
-  valid_values <- values[is.finite(values)]
-  n <- length(valid_values)
-
-  if (n == 0) {
+transform_response <- function(y, method, group) {
+  if (method == "log1p") {
     return(list(
-      n = 0,
-      success = 0,
-      prob = NA_real_,
-      se = NA_real_,
-      lower = NA_real_,
-      upper = NA_real_
+      values = log1p(pmax(y, 0)),
+      label = "log1p(comprometimento)",
+      lambda = NA_real_,
+      shift = 0
     ))
   }
 
-  success <- switch(
-    operator,
-    ">=" = sum(valid_values >= threshold),
-    "<=" = sum(valid_values <= threshold),
-    ">" = sum(valid_values > threshold),
-    "<" = sum(valid_values < threshold),
-    sum(valid_values >= threshold)
-  )
+  if (method == "boxcox") {
+    params <- choose_boxcox_lambda(y, group)
+    shifted_y <- y + params$shift
+    shifted_y <- ifelse(shifted_y <= 0, 1e-6, shifted_y)
 
-  prob <- success / n
-  se <- sqrt(prob * (1 - prob) / n)
-  lower <- max(0, prob - 1.96 * se)
-  upper <- min(1, prob + 1.96 * se)
+    return(list(
+      values = boxcox_transform(shifted_y, params$lambda),
+      label = paste0("Box-Cox aproximada (lambda = ", format_lambda(params$lambda), ")"),
+      lambda = params$lambda,
+      shift = params$shift
+    ))
+  }
 
   list(
-    n = n,
-    success = success,
-    prob = prob,
-    se = se,
-    lower = lower,
-    upper = upper
+    values = y,
+    label = "comprometimento original",
+    lambda = NA_real_,
+    shift = 0
   )
 }
 
-build_correlation_long <- function(df) {
-  corr_df <- df[, c(
-    "Renda",
-    "RendaPerCapita",
-    "GastoEssencial",
-    "Comprometimento",
-    "FolgaFinanceira",
-    "Alimentacao",
-    "Moradia",
-    "Transporte",
-    "Saude",
-    "Educacao",
-    "Membros"
-  )]
-
-  corr_matrix <- cor(corr_df, use = "pairwise.complete.obs")
-  labels <- c(
-    Renda = "Renda",
-    RendaPerCapita = "Renda per\ncapita",
-    GastoEssencial = "Gasto\nessencial",
-    Comprometimento = "Comprometi-\nmento",
-    FolgaFinanceira = "Folga\nfinanceira",
-    Alimentacao = "Alimenta-\ncao",
-    Moradia = "Moradia",
-    Transporte = "Transporte",
-    Saude = "Saude",
-    Educacao = "Educacao",
-    Membros = "Membros"
-  )
-
-  corr_long <- expand.grid(
-    VarX = rownames(corr_matrix),
-    VarY = colnames(corr_matrix),
-    stringsAsFactors = FALSE
-  )
-  corr_long$Correlacao <- as.vector(corr_matrix)
-  corr_long$VarX <- factor(corr_long$VarX, levels = names(labels), labels = labels)
-  corr_long$VarY <- factor(corr_long$VarY, levels = rev(names(labels)), labels = rev(labels))
-  corr_long
+sample_for_shapiro <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) > 5000) {
+    x <- x[round(seq(1, length(x), length.out = 5000))]
+  }
+  if (length(x) < 3 || sd(x) == 0) {
+    return(NA_real_)
+  }
+  tryCatch(shapiro.test(x)$p.value, error = function(error) NA_real_)
 }
 
-build_quintiles <- function(renda) {
-  groups <- rep(NA_integer_, length(renda))
-  valid_index <- which(is.finite(renda))
+run_anova_analysis <- function(df, method) {
+  working <- df[
+    is.finite(df$Comprometimento) &
+      !is.na(df$Quintil) &
+      is.finite(df$Renda),
+  ]
+  working$Quintil <- droplevels(working$Quintil)
 
-  if (length(valid_index) == 0) {
-    return(factor(quintil_labels[groups], levels = quintil_labels))
+  counts <- table(working$Quintil)
+  keep_groups <- names(counts[counts >= 2])
+  working <- working[working$Quintil %in% keep_groups, ]
+  working$Quintil <- droplevels(working$Quintil)
+
+  if (nrow(working) < 10 || nlevels(working$Quintil) < 2) {
+    stop("A ANOVA precisa de pelo menos dois quintis com observacoes suficientes.")
   }
 
-  ordered_index <- valid_index[order(renda[valid_index], seq_along(valid_index))]
-  ordered_position <- seq_along(ordered_index)
-  groups[ordered_index] <- pmin(
-    5L,
-    floor((ordered_position - 1L) * 5L / length(ordered_index)) + 1L
+  transformed <- transform_response(working$Comprometimento, method, working$Quintil)
+  working$RespostaAnova <- transformed$values
+  working <- working[is.finite(working$RespostaAnova), ]
+  working$Quintil <- droplevels(working$Quintil)
+
+  fit <- aov(RespostaAnova ~ Quintil, data = working)
+  anova_table <- anova(fit)
+  ss_between <- anova_table["Quintil", "Sum Sq"]
+  ss_residual <- anova_table["Residuals", "Sum Sq"]
+  eta_squared <- ss_between / (ss_between + ss_residual)
+  p_value <- anova_table["Quintil", "Pr(>F)"]
+  f_value <- anova_table["Quintil", "F value"]
+
+  residual_values <- residuals(fit)
+  fitted_values <- fitted(fit)
+  group_sd <- tapply(working$RespostaAnova, working$Quintil, sd, na.rm = TRUE)
+  group_sd <- group_sd[is.finite(group_sd) & group_sd > 0]
+  sd_ratio <- ifelse(length(group_sd) >= 2, max(group_sd) / min(group_sd), NA_real_)
+
+  bartlett_p <- tryCatch(
+    bartlett.test(RespostaAnova ~ Quintil, data = working)$p.value,
+    error = function(error) NA_real_
   )
 
-  factor(quintil_labels[groups], levels = quintil_labels)
+  tukey <- tryCatch(
+    TukeyHSD(fit, "Quintil")$Quintil,
+    error = function(error) NULL
+  )
+
+  list(
+    data = working,
+    fit = fit,
+    table = anova_table,
+    method = method,
+    transform_label = transformed$label,
+    lambda = transformed$lambda,
+    shift = transformed$shift,
+    p_value = p_value,
+    f_value = f_value,
+    eta_squared = eta_squared,
+    shapiro_p = sample_for_shapiro(residual_values),
+    bartlett_p = bartlett_p,
+    sd_ratio = sd_ratio,
+    residuals = residual_values,
+    fitted = fitted_values,
+    tukey = tukey
+  )
 }
 
-build_summary_table <- function(df, stat) {
-  output <- data.frame(
-    Quintil = quintil_labels,
-    check.names = FALSE,
-    stringsAsFactors = FALSE
-  )
+summarize_quintiles <- function(df) {
+  rows <- lapply(levels(df$Quintil), function(group_name) {
+    group_data <- df[df$Quintil == group_name, ]
 
-  variable_map <- c(
-    "Renda mensal" = "Renda",
-    "Renda per capita" = "RendaPerCapita",
-    "Alimentacao" = "Alimentacao",
-    "Moradia" = "Moradia",
-    "Transporte" = "Transporte",
-    "Saude" = "Saude",
-    "Educacao" = "Educacao",
-    "Gasto essencial" = "GastoEssencial",
-    "Comprometimento" = "Comprometimento",
-    "Folga financeira" = "FolgaFinanceira"
-  )
+    if (nrow(group_data) == 0) {
+      return(data.frame(
+        Quintil = group_name,
+        Familias = 0,
+        MediaComprometimento = NA_real_,
+        MedianaComprometimento = NA_real_,
+        DesvioPadrao = NA_real_,
+        ErroPadrao = NA_real_,
+        ICInferior = NA_real_,
+        ICSuperior = NA_real_,
+        MediaRenda = NA_real_,
+        MediaGasto = NA_real_,
+        MediaFolga = NA_real_
+      ))
+    }
 
-  for (label in names(variable_map)) {
-    column_name <- variable_map[[label]]
-    output[[label]] <- vapply(
-      quintil_labels,
-      function(group_label) {
-        calc_stat(df[df$Quintil == group_label, column_name], stat)
-      },
-      numeric(1)
+    n <- nrow(group_data)
+    sd_value <- sd(group_data$Comprometimento, na.rm = TRUE)
+    se_value <- sd_value / sqrt(n)
+    margin <- ifelse(n > 1, qt(0.975, df = n - 1) * se_value, NA_real_)
+    mean_value <- mean(group_data$Comprometimento, na.rm = TRUE)
+
+    data.frame(
+      Quintil = group_name,
+      Familias = n,
+      MediaComprometimento = mean_value,
+      MedianaComprometimento = median(group_data$Comprometimento, na.rm = TRUE),
+      DesvioPadrao = sd_value,
+      ErroPadrao = se_value,
+      ICInferior = mean_value - margin,
+      ICSuperior = mean_value + margin,
+      MediaRenda = mean(group_data$Renda, na.rm = TRUE),
+      MediaGasto = mean(group_data$GastoEssencial, na.rm = TRUE),
+      MediaFolga = mean(group_data$FolgaFinanceira, na.rm = TRUE)
     )
-  }
+  })
 
-  output
+  do.call(rbind, rows)
+}
+
+format_summary_table <- function(summary_df) {
+  data.frame(
+    Quintil = summary_df$Quintil,
+    Familias = format_number_br(summary_df$Familias, 0),
+    `Media do comprometimento` = format_pct(summary_df$MediaComprometimento),
+    `IC 95% da media` = paste0(
+      format_pct(summary_df$ICInferior),
+      " a ",
+      format_pct(summary_df$ICSuperior)
+    ),
+    Mediana = format_pct(summary_df$MedianaComprometimento),
+    `Renda media` = format_brl(summary_df$MediaRenda),
+    `Gasto essencial medio` = format_brl(summary_df$MediaGasto),
+    check.names = FALSE
+  )
 }
 
 build_quintile_ranges <- function(df) {
-  do.call(
-    rbind,
-    lapply(
-      quintil_labels,
-      function(group_label) {
-        subset_df <- df[df$Quintil == group_label, , drop = FALSE]
+  rows <- lapply(levels(df$Quintil), function(group_name) {
+    group_data <- df[df$Quintil == group_name, ]
 
-        if (nrow(subset_df) == 0) {
-          return(
-            data.frame(
-              Quintil = group_label,
-              Familias = 0,
-              "Renda minima" = NA_real_,
-              "Renda mediana" = NA_real_,
-              "Renda maxima" = NA_real_,
-              check.names = FALSE,
-              stringsAsFactors = FALSE
-            )
-          )
-        }
-
-        data.frame(
-          Quintil = group_label,
-          Familias = nrow(subset_df),
-          "Renda minima" = min(subset_df$Renda, na.rm = TRUE),
-          "Renda mediana" = median(subset_df$Renda, na.rm = TRUE),
-          "Renda maxima" = max(subset_df$Renda, na.rm = TRUE),
-          check.names = FALSE,
-          stringsAsFactors = FALSE
-        )
-      }
+    data.frame(
+      Quintil = group_name,
+      Familias = nrow(group_data),
+      `Menor renda mensal` = ifelse(nrow(group_data) == 0, NA_real_, min(group_data$Renda, na.rm = TRUE)),
+      `Maior renda mensal` = ifelse(nrow(group_data) == 0, NA_real_, max(group_data$Renda, na.rm = TRUE)),
+      check.names = FALSE
     )
-  )
+  })
+
+  ranges <- do.call(rbind, rows)
+  ranges$Familias <- format_number_br(ranges$Familias, 0)
+  ranges$`Menor renda mensal` <- format_brl(ranges$`Menor renda mensal`)
+  ranges$`Maior renda mensal` <- format_brl(ranges$`Maior renda mensal`)
+  ranges
 }
 
-build_cutoff_table <- function(renda) {
-  valid_renda <- renda[is.finite(renda)]
-
-  if (length(valid_renda) == 0) {
-    return(
-      data.frame(
-        Percentil = c("0%", "20%", "40%", "60%", "80%", "100%"),
-        "Renda mensal" = NA_real_,
-        check.names = FALSE,
-        stringsAsFactors = FALSE
-      )
-    )
-  }
-
-  quantiles <- quantile(valid_renda, probs = seq(0, 1, 0.2), na.rm = TRUE, type = 7)
+build_cutoff_table <- function(df) {
+  probs <- c(0.2, 0.4, 0.6, 0.8)
+  cutoffs <- quantile(df$Renda, probs = probs, na.rm = TRUE, type = 7)
 
   data.frame(
-    Percentil = c("0%", "20%", "40%", "60%", "80%", "100%"),
-    "Renda mensal" = as.numeric(quantiles),
-    check.names = FALSE,
-    stringsAsFactors = FALSE
+    `Corte acumulado` = paste0(format_number_br(probs * 100, 0), "%"),
+    `Renda mensal estimada` = format_brl(as.numeric(cutoffs)),
+    `Como interpretar` = c(
+      "Ate este valor fica o primeiro quintil.",
+      "Ate este valor ficam os dois primeiros quintis.",
+      "Ate este valor ficam os tres primeiros quintis.",
+      "Ate este valor ficam os quatro primeiros quintis."
+    ),
+    check.names = FALSE
   )
 }
 
-build_category_share_table <- function(df) {
-  do.call(
-    rbind,
-    lapply(
-      quintil_labels,
-      function(group_label) {
-        subset_df <- df[df$Quintil == group_label, , drop = FALSE]
-        values <- c(
-          Alimentacao = mean(subset_df$Alimentacao, na.rm = TRUE),
-          Moradia = mean(subset_df$Moradia, na.rm = TRUE),
-          Transporte = mean(subset_df$Transporte, na.rm = TRUE),
-          Saude = mean(subset_df$Saude, na.rm = TRUE),
-          Educacao = mean(subset_df$Educacao, na.rm = TRUE)
-        )
+format_anova_table <- function(result) {
+  table <- result$table
 
-        total <- sum(values, na.rm = TRUE)
-        shares <- if (total > 0) values / total else rep(NA_real_, length(values))
-
-        data.frame(
-          Quintil = factor(group_label, levels = quintil_labels),
-          Categoria = names(shares),
-          Participacao = as.numeric(shares),
-          stringsAsFactors = FALSE
-        )
-      }
-    )
+  data.frame(
+    Fonte = rownames(table),
+    GL = table$Df,
+    `Soma dos quadrados` = format_number_br(table$`Sum Sq`, 4),
+    `Quadrado medio` = format_number_br(table$`Mean Sq`, 4),
+    F = ifelse(is.na(table$`F value`), "-", format_number_br(table$`F value`, 2)),
+    `p-valor` = sapply(table$`Pr(>F)`, format_pvalue),
+    check.names = FALSE
   )
 }
 
-plot_palette <- function(theme_mode) {
-  if (identical(theme_mode, "Claro")) {
-    return(list(
-      bg = "#F4F7FB",
-      panel = "#FFFFFF",
-      text = "#182230",
-      muted = "#5D6B82",
-      grid = "#D8E0EA",
-      accent = "#14B8A6",
-      accent_alt = "#F59E0B",
-      accent_soft = "#0F766E",
-      border = "#D0D8E2",
-      histogram = "#2563EB",
-      box = "#F97316"
+format_tukey_table <- function(result) {
+  tukey <- result$tukey
+
+  if (is.null(tukey)) {
+    return(data.frame(
+      Comparacao = "Tukey nao disponivel",
+      Diferenca = "-",
+      `p ajustado` = "-",
+      check.names = FALSE
     ))
   }
 
-  list(
-    bg = "#0B1120",
-    panel = "#111827",
-    text = "#E5EEF8",
-    muted = "#A7B3C8",
-    grid = "#334155",
-    accent = "#34D399",
-    accent_alt = "#FBBF24",
-    accent_soft = "#38BDF8",
-    border = "#334155",
-    histogram = "#22C55E",
-    box = "#F59E0B"
+  tukey_df <- data.frame(
+    Comparacao = rownames(tukey),
+    Diferenca = tukey[, "diff"],
+    `p ajustado` = tukey[, "p adj"],
+    check.names = FALSE
+  )
+  tukey_df <- tukey_df[order(tukey_df$`p ajustado`), ]
+  tukey_df <- head(tukey_df, 8)
+
+  data.frame(
+    Comparacao = tukey_df$Comparacao,
+    Diferenca = format_number_br(tukey_df$Diferenca, 4),
+    `p ajustado` = sapply(tukey_df$`p ajustado`, format_pvalue),
+    check.names = FALSE
   )
 }
 
-plot_theme <- function(theme_mode) {
-  pal <- plot_palette(theme_mode)
+build_transform_comparison <- function(df) {
+  methods <- names(transform_choices)
 
-  theme_minimal(base_size = 15) +
+  rows <- lapply(seq_along(transform_choices), function(i) {
+    result <- run_anova_analysis(df, transform_choices[i])
+    data.frame(
+      Transformacao = methods[i],
+      `F da ANOVA` = format_number_br(result$f_value, 2),
+      `p-valor` = format_pvalue(result$p_value),
+      `eta^2` = format_pct(result$eta_squared),
+      `Shapiro dos residuos` = format_pvalue(result$shapiro_p),
+      `Bartlett variancias` = format_pvalue(result$bartlett_p),
+      Lambda = format_lambda(result$lambda),
+      check.names = FALSE
+    )
+  })
+
+  do.call(rbind, rows)
+}
+
+interpret_eta <- function(eta) {
+  if (is.na(eta)) {
+    return("indeterminado")
+  }
+  if (eta < 0.01) {
+    return("muito pequeno")
+  }
+  if (eta < 0.06) {
+    return("pequeno")
+  }
+  if (eta < 0.14) {
+    return("moderado")
+  }
+  "alto"
+}
+
+plot_theme <- function() {
+  theme_minimal(base_size = 17, base_family = "Segoe UI") +
     theme(
-      plot.background = element_rect(fill = pal$bg, colour = NA),
-      panel.background = element_rect(fill = pal$panel, colour = pal$border),
-      panel.grid.major = element_line(colour = pal$grid, linewidth = 0.35),
+      plot.background = element_rect(fill = "#f8fafc", color = NA),
+      panel.background = element_rect(fill = "#f8fafc", color = NA),
+      panel.grid.major = element_line(color = "#dbe3ee", linewidth = 0.55),
       panel.grid.minor = element_blank(),
-      axis.title = element_text(colour = pal$text, face = "bold"),
-      axis.text = element_text(colour = pal$text, size = 13),
-      plot.title = element_text(colour = pal$text, face = "bold", size = 18),
-      plot.subtitle = element_text(colour = pal$muted, size = 13.2),
+      plot.title = element_text(face = "bold", size = 21, color = "#0f172a"),
+      plot.subtitle = element_text(size = 15, color = "#475569"),
+      axis.title = element_text(face = "bold", size = 16, color = "#0f172a"),
+      axis.text = element_text(color = "#334155", size = 14),
+      axis.text.x = element_text(lineheight = 0.95),
       legend.position = "bottom",
       legend.title = element_blank(),
-      legend.text = element_text(colour = pal$text, size = 12.4),
-      legend.background = element_rect(fill = pal$bg, colour = NA),
-      strip.background = element_rect(fill = pal$panel, colour = pal$border),
-      strip.text = element_text(colour = pal$text, face = "bold", size = 13.2)
+      legend.text = element_text(size = 13, color = "#0f172a"),
+      plot.margin = margin(20, 20, 20, 20)
     )
 }
 
+raw_income <- read.csv(
+  locate_income_file(),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+missing_columns <- setdiff(required_columns, names(raw_income))
+if (length(missing_columns) > 0) {
+  stop("Colunas ausentes no CSV: ", paste(missing_columns, collapse = ", "))
+}
+
+app_css <- "
+:root {
+  color-scheme: dark;
+}
+
+body {
+  --bg: #0f172a;
+  --panel: rgba(15, 23, 42, 0.92);
+  --surface: rgba(30, 41, 59, 0.82);
+  --surface-strong: #1f2937;
+  --text: #f8fafc;
+  --muted: #cbd5e1;
+  --border: rgba(148, 163, 184, 0.24);
+  --accent: #2dd4bf;
+  --accent-2: #fbbf24;
+  --danger: #fb7185;
+  --control-bg: #f8fafc;
+  --control-text: #0f172a;
+  --font-main: 'Segoe UI', 'Trebuchet MS', 'Helvetica Neue', Arial, sans-serif;
+  --font-display: 'Trebuchet MS', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  background:
+    linear-gradient(120deg, rgba(45, 212, 191, 0.18), transparent 40%),
+    linear-gradient(240deg, rgba(251, 191, 36, 0.13), transparent 46%),
+    repeating-linear-gradient(90deg, rgba(248, 250, 252, 0.026) 0 1px, transparent 1px 18px),
+    var(--bg);
+  background-size: 120% 120%, 120% 120%, auto, auto;
+  color: var(--text);
+  font-family: var(--font-main);
+  font-size: 18px;
+  line-height: 1.5;
+  animation: pageGlow 18s ease-in-out infinite alternate;
+}
+
+body[data-theme='light'] {
+  color-scheme: light;
+  --bg: #eef2f7;
+  --panel: rgba(255, 255, 255, 0.94);
+  --surface: #f8fafc;
+  --surface-strong: #e2e8f0;
+  --text: #0f172a;
+  --muted: #475569;
+  --border: rgba(15, 23, 42, 0.14);
+  --accent: #0f9488;
+  --accent-2: #b7791f;
+  --danger: #be123c;
+  --control-bg: #ffffff;
+  --control-text: #0f172a;
+}
+
+.page-shell {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 28px 28px 48px;
+}
+
+.app-header {
+  padding: 18px 0 24px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.app-kicker {
+  color: var(--accent-2);
+  text-transform: uppercase;
+  font-family: var(--font-main);
+  font-weight: 800;
+  font-size: 0.82rem;
+  letter-spacing: 0;
+  margin-bottom: 8px;
+}
+
+.app-title {
+  font-family: var(--font-display);
+  font-size: clamp(2.25rem, 3.7vw, 4.25rem);
+  line-height: 1.02;
+  font-weight: 900;
+  margin: 0 0 12px;
+  color: var(--text);
+}
+
+.app-subtitle {
+  max-width: 1000px;
+  color: var(--muted);
+  font-size: 1.16rem;
+  line-height: 1.58;
+  margin: 0;
+}
+
+.question-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.question-box,
+.hypothesis-box,
+.sidebar-panel,
+.section-panel,
+.metric-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.20);
+  position: relative;
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+}
+
+.question-box::before,
+.hypothesis-box::before,
+.sidebar-panel::before,
+.section-panel::before,
+.metric-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  opacity: 0.78;
+}
+
+.question-box,
+.hypothesis-box {
+  padding: 21px;
+}
+
+.box-label,
+.metric-label,
+.sidebar-title {
+  font-family: var(--font-main);
+  color: var(--accent-2);
+  font-size: 0.84rem;
+  text-transform: uppercase;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin-bottom: 8px;
+}
+
+.question-text {
+  font-size: 1.28rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.hypothesis-box p {
+  margin: 6px 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.layout-row {
+  align-items: flex-start;
+}
+
+.sidebar-panel {
+  position: sticky;
+  top: 18px;
+  padding: 22px 20px 20px;
+}
+
+.sidebar-panel label,
+.control-label {
+  color: var(--text);
+  font-family: var(--font-main);
+  font-size: 1.03rem;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.form-control,
+.selectize-input,
+.selectize-control.single .selectize-input,
+.selectize-control.multi .selectize-input {
+  background: var(--control-bg) !important;
+  color: var(--control-text) !important;
+  border: 1px solid rgba(0, 0, 0, 0.24) !important;
+  border-radius: 6px !important;
+  font-family: var(--font-main) !important;
+  font-size: 1.04rem !important;
+  min-height: 50px;
+  padding: 11px 13px !important;
+  box-shadow: none !important;
+}
+
+.selectize-input input {
+  color: var(--control-text) !important;
+  font-size: 1.04rem !important;
+}
+
+.selectize-input > div,
+.selectize-input .item {
+  color: var(--control-text) !important;
+}
+
+.selectize-dropdown {
+  background: #ffffff !important;
+  color: #171717 !important;
+  border: 1px solid #c9c4b8 !important;
+  font-size: 1.04rem !important;
+}
+
+.selectize-dropdown .option,
+.selectize-dropdown .active {
+  color: #171717 !important;
+  background: #ffffff !important;
+}
+
+.selectize-dropdown .active {
+  background: #e9f4ee !important;
+}
+
+.radio label,
+.checkbox label {
+  color: var(--text);
+  font-size: 1.02rem;
+  line-height: 1.35;
+}
+
+.help-block {
+  color: var(--muted);
+  font-size: 0.97rem;
+}
+
+.nav-tabs {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+
+.nav-tabs > li > a {
+  color: var(--muted);
+  border-radius: 8px 8px 0 0;
+  font-family: var(--font-main);
+  font-weight: 800;
+  font-size: 1rem;
+  padding: 11px 14px;
+}
+
+.nav-tabs > li.active > a,
+.nav-tabs > li.active > a:focus,
+.nav-tabs > li.active > a:hover {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+  border-bottom-color: var(--panel);
+}
+
+.section-panel {
+  padding: 24px;
+  margin-bottom: 18px;
+}
+
+.section-title {
+  font-size: 1.65rem;
+  font-weight: 800;
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.section-copy {
+  color: var(--muted);
+  font-size: 1.06rem;
+  line-height: 1.58;
+  margin: 0 0 16px;
+}
+
+.method-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 12px;
+}
+
+.method-step {
+  min-height: 132px;
+  padding: 17px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  animation: riseIn 0.55s ease both;
+}
+
+.method-step:nth-child(2) { animation-delay: 0.07s; }
+.method-step:nth-child(3) { animation-delay: 0.14s; }
+.method-step:nth-child(4) { animation-delay: 0.21s; }
+.method-step:nth-child(5) { animation-delay: 0.28s; }
+
+.step-number {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: #111111;
+  font-family: var(--font-main);
+  font-weight: 900;
+  margin-bottom: 12px;
+}
+
+.step-title {
+  font-family: var(--font-main);
+  font-weight: 900;
+  font-size: 1rem;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.step-copy {
+  color: var(--muted);
+  line-height: 1.4;
+  font-size: 1rem;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.metric-card {
+  padding: 20px;
+  min-height: 138px;
+  animation: riseIn 0.5s ease both;
+}
+
+.metric-value {
+  font-size: 1.9rem;
+  font-weight: 900;
+  line-height: 1.1;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.metric-note {
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.insight-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.insight-list li {
+  padding: 14px 15px;
+  border-left: 4px solid var(--accent);
+  background: var(--surface);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 1.04rem;
+  line-height: 1.45;
+}
+
+.result-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(88, 185, 141, 0.16);
+  border: 1px solid rgba(88, 185, 141, 0.38);
+  color: var(--text);
+  font-family: var(--font-main);
+  font-weight: 800;
+  font-size: 1rem;
+  margin-bottom: 12px;
+}
+
+.table {
+  color: var(--text);
+  font-size: 1.03rem;
+  background: transparent;
+}
+
+.table > thead > tr > th {
+  color: var(--accent-2);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-main);
+  padding: 11px 12px;
+}
+
+.table > tbody > tr > td {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) {
+  background-color: rgba(255, 255, 255, 0.045);
+}
+
+body[data-theme='light'] .table-striped > tbody > tr:nth-of-type(odd) {
+  background-color: rgba(23, 23, 23, 0.035);
+}
+
+.plot-frame {
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid rgba(23, 23, 23, 0.12);
+  overflow: hidden;
+  margin-bottom: 18px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+}
+
+.footer-note {
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.metric-card,
+.method-step {
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+
+.metric-card:hover,
+.method-step:hover {
+  transform: translateY(-3px);
+  border-color: rgba(45, 212, 191, 0.48);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22);
+}
+
+@keyframes pageGlow {
+  from {
+    background-position: 0% 0%, 100% 0%, 0 0, 0 0;
+  }
+  to {
+    background-position: 18% 8%, 82% 16%, 36px 0, 0 0;
+  }
+}
+
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1100px) {
+  .question-strip,
+  .metric-grid,
+  .method-steps {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .sidebar-panel {
+    position: static;
+    margin-bottom: 18px;
+  }
+}
+
+@media (max-width: 760px) {
+  .page-shell {
+    padding: 18px 14px 36px;
+  }
+
+  .question-strip,
+  .metric-grid,
+  .method-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .app-title {
+    font-size: 2.25rem;
+  }
+}
+"
+
 ui <- fluidPage(
   tags$head(
-    tags$style(HTML("
-      :root {
-        --bg: #F4F7FB;
-        --card: #FFFFFF;
-        --card-soft: #EEF4FF;
-        --text: #182230;
-        --muted: #5D6B82;
-        --input-bg: #FFFFFF;
-        --input-text: #182230;
-        --input-muted: #64748B;
-        --accent: #14B8A6;
-        --accent-2: #F59E0B;
-        --border: rgba(24, 34, 48, 0.12);
-        --row-alt: rgba(15, 23, 42, 0.04);
-        --shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
-      }
-
-      body.dark-mode {
-        --bg: #0B1120;
-        --card: #111827;
-        --card-soft: #172036;
-        --text: #E5EEF8;
-        --muted: #A7B3C8;
-        --input-bg: #0F172A;
-        --input-text: #F8FAFC;
-        --input-muted: #CBD5E1;
-        --accent: #34D399;
-        --accent-2: #FBBF24;
-        --border: rgba(148, 163, 184, 0.20);
-        --row-alt: rgba(255, 255, 255, 0.04);
-        --shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
-      }
-
-      body {
-        background:
-          radial-gradient(circle at top left, rgba(20, 184, 166, 0.16), transparent 34%),
-          radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 28%),
-          var(--bg);
-        color: var(--text);
-        font-size: 19px;
-        line-height: 1.6;
-        position: relative;
-        overflow-x: hidden;
-        transition: background-color 0.25s ease, color 0.25s ease;
-      }
-
-      body::before,
-      body::after {
-        content: '';
-        position: fixed;
-        border-radius: 999px;
-        filter: blur(70px);
-        opacity: 0.22;
-        z-index: -1;
-        pointer-events: none;
-        animation: float-orb 16s ease-in-out infinite;
-      }
-
-      body::before {
-        width: 260px;
-        height: 260px;
-        background: var(--accent);
-        top: 8%;
-        left: -70px;
-      }
-
-      body::after {
-        width: 220px;
-        height: 220px;
-        background: var(--accent-2);
-        right: -50px;
-        bottom: 10%;
-        animation-duration: 20s;
-      }
-
-      @keyframes float-orb {
-        0% { transform: translate3d(0, 0, 0) scale(1); }
-        50% { transform: translate3d(25px, -20px, 0) scale(1.08); }
-        100% { transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      @keyframes rise-in {
-        0% { opacity: 0; transform: translateY(16px); }
-        100% { opacity: 1; transform: translateY(0); }
-      }
-
-      @keyframes pulse-glow {
-        0% { box-shadow: 0 0 0 rgba(0, 0, 0, 0); }
-        50% { box-shadow: 0 0 0 6px rgba(20, 184, 166, 0.08); }
-        100% { box-shadow: 0 0 0 rgba(0, 0, 0, 0); }
-      }
-
-      .container-fluid {
-        max-width: 1380px;
-        margin: 0 auto;
-        padding-bottom: 30px;
-      }
-
-      .hero-panel,
-      .card-box,
-      .metric-card,
-      .well {
-        background: var(--card);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 18px;
-        box-shadow: var(--shadow);
-        animation: rise-in 0.55s ease-out both;
-      }
-
-      .hero-panel {
-        padding: 24px 28px;
-        margin: 22px 0 18px 0;
-      }
-
-      .hero-title {
-        margin: 0 0 10px 0;
-        font-size: 2.2rem;
-        font-weight: 800;
-        letter-spacing: 0.02em;
-      }
-
-      .hero-subtitle,
-      .muted-text {
-        color: var(--muted);
-      }
-
-      .hero-subtitle {
-        font-size: 1.22rem;
-        line-height: 1.6;
-        margin-bottom: 12px;
-      }
-
-      .question-box {
-        margin-top: 12px;
-        padding: 14px 16px;
-        border-radius: 14px;
-        background: var(--card-soft);
-        border-left: 5px solid var(--accent);
-        font-weight: 600;
-      }
-
-      .well {
-        padding: 18px;
-      }
-
-      .well,
-      .card-box,
-      .metric-card,
-      .question-box,
-      .note-box,
-      table,
-      .form-control,
-      .selectize-input,
-      .selectize-dropdown,
-      .nav-tabs > li > a,
-      .irs-grid-text,
-      .irs-min,
-      .irs-max,
-      .help-block {
-        font-size: 1.12rem;
-      }
-
-      .metric-card {
-        padding: 16px 18px;
-        margin-bottom: 18px;
-        min-height: 138px;
-        transition: transform 0.25s ease, box-shadow 0.25s ease;
-      }
-
-      .metric-card:hover,
-      .card-box:hover {
-        transform: translateY(-3px);
-      }
-
-      .metric-label {
-        color: var(--muted);
-        font-size: 1.02rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-
-      .metric-value {
-        font-size: 2.18rem;
-        font-weight: 800;
-        margin: 8px 0;
-      }
-
-      .metric-help {
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.5;
-      }
-
-      .card-box {
-        padding: 20px 22px;
-        margin-bottom: 18px;
-      }
-
-      .section-title {
-        margin-top: 0;
-        margin-bottom: 8px;
-        font-size: 1.6rem;
-        font-weight: 800;
-      }
-
-      .note-box {
-        margin-top: 12px;
-        padding: 14px 16px;
-        border-radius: 12px;
-        background: var(--card-soft);
-        color: var(--text);
-      }
-
-      .formula-line {
-        margin-bottom: 10px;
-        line-height: 1.7;
-      }
-
-      .shiny-input-container label,
-      .control-label {
-        color: var(--text);
-        font-weight: 700;
-        font-size: 1.16rem;
-      }
-
-      .form-control,
-      .selectize-input,
-      .selectize-dropdown,
-      .irs-bar,
-      .irs-line,
-      .irs-grid-text {
-        color: var(--input-text);
-      }
-
-      .form-control,
-      .selectize-input,
-      .selectize-dropdown,
-      .selectize-dropdown-content {
-        background: var(--input-bg) !important;
-      }
-
-      .selectize-input,
-      .form-control {
-        border: 1px solid var(--border);
-        min-height: 54px;
-        font-size: 1.1rem !important;
-        color: var(--input-text) !important;
-      }
-
-      .selectize-input {
-        padding: 12px 14px;
-        box-shadow: none !important;
-      }
-
-      .selectize-control.single .selectize-input,
-      .selectize-control.single .selectize-input.input-active,
-      .selectize-control.single .selectize-input.full,
-      .selectize-control.multi .selectize-input {
-        background: var(--input-bg) !important;
-        color: var(--input-text) !important;
-      }
-
-      .selectize-input input,
-      .selectize-input > div,
-      .selectize-input .item,
-      .selectize-dropdown .option,
-      .selectize-dropdown .item,
-      .form-control,
-      .help-block,
-      .irs-grid-text,
-      .irs-min,
-      .irs-max,
-      .irs-single {
-        color: var(--input-text) !important;
-        font-size: 1.1rem !important;
-      }
-
-      .selectize-input input::placeholder,
-      .selectize-control.single .selectize-input.not-full::after,
-      .selectize-control.single .selectize-input.input-active::after {
-        color: var(--input-muted) !important;
-      }
-
-      .selectize-control.single .selectize-input:after {
-        border-color: var(--input-text) transparent transparent transparent !important;
-      }
-
-      .selectize-dropdown {
-        border: 1px solid var(--border);
-        box-shadow: var(--shadow);
-      }
-
-      .selectize-dropdown .active,
-      .selectize-dropdown .option:hover {
-        background: var(--card-soft);
-        color: var(--input-text) !important;
-      }
-
-      .selectize-control.multi .selectize-input > div {
-        background: var(--card-soft);
-        color: var(--input-text);
-        border: 1px solid var(--border);
-      }
-
-      .checkbox,
-      .radio {
-        font-size: 1rem;
-      }
-
-      .nav-tabs {
-        border-bottom: 1px solid var(--border);
-        margin-bottom: 18px;
-      }
-
-      .nav-tabs > li > a {
-        color: var(--muted);
-        border: 0;
-        border-radius: 12px 12px 0 0;
-        font-weight: 700;
-      }
-
-      .nav-tabs > li.active > a,
-      .nav-tabs > li.active > a:focus,
-      .nav-tabs > li.active > a:hover {
-        color: var(--text);
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-bottom-color: var(--card);
-      }
-
-      .table-wrapper {
-        overflow-x: auto;
-      }
-
-      table {
-        width: 100%;
-        color: var(--text);
-        border-collapse: collapse;
-        background: transparent;
-      }
-
-      th, td {
-        border-bottom: 1px solid var(--border);
-        padding: 10px 12px;
-        text-align: right;
-        white-space: nowrap;
-        color: var(--text) !important;
-        background: transparent !important;
-        font-size: 1.06rem;
-      }
-
-      th:first-child,
-      td:first-child {
-        text-align: left;
-      }
-
-      thead tr,
-      .table > thead > tr > th {
-        background: var(--card-soft) !important;
-      }
-
-      .table > tbody > tr > td,
-      .table > thead > tr > th {
-        color: var(--text) !important;
-      }
-
-      .table-striped > tbody > tr:nth-of-type(odd) {
-        background: var(--row-alt) !important;
-      }
-
-      .small-note {
-        color: var(--muted);
-        font-size: 1.1rem;
-        line-height: 1.6;
-      }
-
-      .prob-card {
-        min-height: 360px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 12px;
-      }
-
-      .prob-title {
-        color: var(--muted);
-        font-size: 1rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 700;
-      }
-
-      .prob-value {
-        font-size: 2.6rem;
-        font-weight: 800;
-        color: var(--text);
-      }
-
-      .prob-track {
-        width: 100%;
-        height: 18px;
-        border-radius: 999px;
-        background: var(--card-soft);
-        overflow: hidden;
-        border: 1px solid var(--border);
-      }
-
-      .prob-fill {
-        height: 100%;
-        border-radius: 999px;
-        background: linear-gradient(90deg, var(--accent), var(--accent-2));
-        animation: pulse-glow 2.4s ease-in-out infinite;
-        transition: width 0.35s ease;
-      }
-
-      .prob-detail {
-        color: var(--muted);
-        font-size: 1.04rem;
-      }
-    ")),
+    tags$style(HTML(app_css)),
     tags$script(HTML("
-      Shiny.addCustomMessageHandler('apply-theme-mode', function(mode) {
-        document.body.classList.toggle('dark-mode', mode === 'Escuro');
+      $(document).on('shiny:connected', function() {
+        document.body.setAttribute('data-theme', Shiny.shinyapp.$inputValues.tema || 'dark');
+      });
+      $(document).on('shiny:inputchanged', function(event) {
+        if (event.name === 'tema') {
+          document.body.setAttribute('data-theme', event.value);
+        }
       });
     "))
   ),
 
   div(
-    class = "hero-panel",
-    h1(class = "hero-title", "Teoria das Botas de Sam Vimes"),
-    p(
-      class = "hero-subtitle",
-      "Dashboard para a Parte 2 da disciplina de Estatistica e Probabilidade, com foco em analise descritiva, contexto, metricas-resumo, filtros e interpretacoes iniciais."
-    ),
-    p(
-      class = "hero-subtitle",
-      "A ideia central e observar se familias com menor renda comprometem proporcionalmente mais renda com gastos essenciais, reduzindo sua folga financeira e reforcando a intuicao da teoria das botas."
-    ),
+    class = "page-shell",
     div(
-      class = "question-box",
-      "Pergunta de pesquisa: familias de menor renda gastam uma parcela maior da renda mensal com itens essenciais do que familias de maior renda?"
-    )
-  ),
-
-  sidebarLayout(
-    sidebarPanel(
-      width = 3,
-      selectInput(
-        "tema",
-        "Tema do dashboard",
-        choices = c("Escuro", "Claro"),
-        selected = "Escuro"
+      class = "app-header",
+      div(class = "app-kicker", "Projeto Analise de Dados - Parte 3"),
+      h1(class = "app-title", "A teoria das Botas de Sam Vimes em teste estatistico"),
+      p(
+        class = "app-subtitle",
+        "A Parte 3 reorganiza o projeto em torno de uma pergunta unica: a renda familiar altera, de forma estatisticamente observavel, o percentual da renda comprometido com gastos essenciais?"
       ),
-      numericInput(
-        "taxa_cambio",
-        "Taxa PHP -> BRL usada na conversao",
-        value = 0.09,
-        min = 0.001,
-        step = 0.001
-      ),
-      helpText(
-        "Formula adotada no app: valor anual em PHP x taxa de cambio / 12 = valor mensal em BRL."
-      ),
-      selectInput(
-        "base_quintil",
-        "Como os quintis sao calculados?",
-        choices = c(
-          "Recalcular com os dados filtrados" = "filtrada",
-          "Usar os quintis da base completa" = "completa"
+      div(
+        class = "question-strip",
+        div(
+          class = "question-box",
+          div(class = "box-label", "Pergunta de pesquisa"),
+          p(
+            class = "question-text",
+            "O comprometimento medio da renda com alimentacao, moradia, transporte, saude e educacao difere entre os quintis de renda?"
+          )
         ),
-        selected = "filtrada"
-      ),
-      uiOutput("regiao_ui"),
-      uiOutput("fonte_ui"),
-      uiOutput("familia_ui"),
-      selectInput(
-        "medida_resumo",
-        "Medida-resumo principal",
-        choices = c(
-          "Media" = "mean",
-          "Mediana" = "median",
-          "Desvio-padrao" = "sd",
-          "IQR" = "iqr"
-        ),
-        selected = "mean"
-      ),
-      selectInput(
-        "indicador_principal",
-        "Indicador principal por quintil",
-        choices = indicator_choices,
-        selected = "Comprometimento"
-      ),
-      selectInput(
-        "grafico_secundario",
-        "Grafico complementar",
-        choices = c(
-          "Composicao percentual da cesta essencial" = "composicao",
-          "Dispersao do indicador pela renda" = "dispersao",
-          "Comparacao regional do indicador" = "regiao"
-        ),
-        selected = "composicao"
-      ),
-      selectInput(
-        "variavel_prob",
-        "Variavel para probabilidade empirica",
-        choices = indicator_choices,
-        selected = "Comprometimento"
-      ),
-      selectInput(
-        "operador_prob",
-        "Evento probabilistico",
-        choices = c(
-          "Maior ou igual ao limiar" = ">=",
-          "Menor ou igual ao limiar" = "<="
-        ),
-        selected = ">="
-      ),
-      uiOutput("limiar_prob_ui"),
-      selectInput(
-        "relacao_x",
-        "Variavel X para relacoes",
-        choices = indicator_choices,
-        selected = "Renda"
-      ),
-      selectInput(
-        "relacao_y",
-        "Variavel Y para relacoes",
-        choices = indicator_choices,
-        selected = "GastoEssencial"
+        div(
+          class = "hypothesis-box",
+          div(class = "box-label", "Hipoteses da ANOVA"),
+          p(strong("H0:"), " as medias dos quintis sao iguais."),
+          p(strong("H1:"), " pelo menos um quintil possui media diferente.")
+        )
       )
     ),
 
-    mainPanel(
-      width = 9,
-      tabsetPanel(
-        tabPanel(
-          "Visao Geral",
-          uiOutput("metric_cards"),
-          uiOutput("amostra_card"),
-          fluidRow(
-            column(6, plotOutput("comprometimento_plot", height = "360px")),
-            column(6, plotOutput("grafico_secundario_plot", height = "360px"))
+    fluidRow(
+      class = "layout-row",
+      column(
+        width = 3,
+        div(
+          class = "sidebar-panel",
+          div(class = "sidebar-title", "Controles da analise"),
+          radioButtons(
+            "tema",
+            "Tema visual",
+            choices = c("Escuro" = "dark", "Claro" = "light"),
+            selected = "dark",
+            inline = TRUE
+          ),
+          numericInput(
+            "taxa_cambio",
+            "Conversao aproximada PHP -> BRL",
+            value = 0.09,
+            min = 0.01,
+            max = 1,
+            step = 0.01
+          ),
+          radioButtons(
+            "base_quintil",
+            "Como calcular os quintis",
+            choices = c(
+              "Base completa" = "global",
+              "Dados filtrados" = "filtered"
+            ),
+            selected = "global"
+          ),
+          uiOutput("regiao_ui"),
+          uiOutput("fonte_ui"),
+          uiOutput("familia_ui"),
+          selectInput(
+            "transformacao_anova",
+            "Transformacao usada na ANOVA",
+            choices = transform_choices,
+            selected = "log1p"
+          ),
+          checkboxInput(
+            "mostrar_pontos",
+            "Mostrar pontos individuais no boxplot",
+            value = FALSE
           ),
           div(
-            class = "card-box",
-            h3(class = "section-title", "Insights iniciais"),
-            uiOutput("insights_ui")
+            class = "footer-note",
+            "Sugestao para a apresentacao: comece pela aba Metodo, avance para Descritiva Focada e finalize com ANOVA e Transformacoes."
           )
-        ),
-        tabPanel(
-          "Distribuicao e Probabilidade",
-          fluidRow(
-            column(8, plotOutput("ecdf_plot", height = "380px")),
-            column(4, uiOutput("probabilidade_card"))
-          ),
-          fluidRow(
-            column(6, plotOutput("boxplot_plot", height = "380px")),
-            column(6, plotOutput("densidade_plot", height = "380px"))
-          ),
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Como ler estes graficos"),
-            p(
-              class = "small-note",
-              "A curva acumulada empirica mostra a probabilidade observada de o indicador ficar abaixo de um valor. O boxplot e a densidade ajudam a comparar centro, dispersao, assimetria e concentracao entre os quintis."
-            )
-          )
-        ),
-        tabPanel(
-          "Relacoes",
-          fluidRow(
-            column(6, plotOutput("relacao_plot", height = "430px")),
-            column(6, plotOutput("correlacao_plot", height = "430px"))
+        )
+      ),
 
-          ),
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Leitura estatistica"),
-            p(
-              class = "small-note",
-              "O grafico de relacao ajuda a observar tendencias e possiveis padroes entre duas variaveis. O mapa de correlacoes resume a intensidade e o sentido das relacoes lineares entre os principais indicadores do projeto."
-            )
-          )
-        ),
-        tabPanel(
-          "Tabelas",
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Medidas-resumo por quintil"),
-            p(
-              class = "small-note",
-              textOutput("summary_note", inline = TRUE)
-            ),
-            div(class = "table-wrapper", tableOutput("resumo_tabela"))
-          ),
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Faixas observadas dos quintis"),
-            p(
-              class = "small-note",
-              textOutput("quintil_note", inline = TRUE)
-            ),
-            div(class = "table-wrapper", tableOutput("quintis_tabela"))
-          ),
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Pontos de corte da renda mensal"),
-            p(
-              class = "small-note",
-              "Tabela dos percentis 0%, 20%, 40%, 60%, 80% e 100% da renda mensal usada como referencia descritiva."
-            ),
-            div(class = "table-wrapper", tableOutput("cutoffs_tabela"))
-          )
-        ),
-        tabPanel(
-          "Metodologia",
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Contexto e construcao dos indicadores"),
-            p(
-              class = "formula-line",
-              "1. O conjunto de dados registra informacoes domiciliares anuais. Neste projeto, os valores monetarios sao convertidos de PHP para BRL e depois divididos por 12 para representar uma leitura mensal."
-            ),
-            p(
-              class = "formula-line",
-              "2. Gasto essencial = Alimentacao + Moradia/agua + Transporte + Saude + Educacao."
-            ),
-            p(
-              class = "formula-line",
-              "3. Comprometimento da renda = Gasto essencial / Renda mensal."
-            ),
-            p(
-              class = "formula-line",
-              "4. Folga financeira = Renda mensal - Gasto essencial."
-            ),
-            p(
-              class = "formula-line",
-              "5. Renda per capita = Renda mensal / numero de moradores da familia."
-            ),
-            p(
-              class = "formula-line",
-              "6. Probabilidade empirica: para um evento definido pelo usuario, o app calcula a proporcao de familias filtradas que satisfazem a condicao."
-            ),
-            p(
-              class = "formula-line",
-              "7. Curva acumulada empirica: mostra, para cada valor do indicador, a proporcao observada de familias com resultado menor ou igual a esse valor."
+      column(
+        width = 9,
+        tabsetPanel(
+          id = "abas",
+          selected = "Metodo",
+          tabPanel(
+            "Metodologia",
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Ordem da apresentacao"),
+              p(
+                class = "section-copy",
+                "Esta aba foi colocada primeiro para corrigir o ponto central do feedback: antes das tabelas, o projeto precisa explicar o que esta testando, como os grupos foram construidos e por que a ANOVA foi escolhida."
+              ),
+              div(
+                class = "method-steps",
+                div(
+                  class = "method-step",
+                  div(class = "step-number", "1"),
+                  div(class = "step-title", "Pergunta"),
+                  div(class = "step-copy", "Comparar o percentual da renda comprometido com gastos essenciais.")
+                ),
+                div(
+                  class = "method-step",
+                  div(class = "step-number", "2"),
+                  div(class = "step-title", "Fator"),
+                  div(class = "step-copy", "Um unico fator: quintil de renda, com cinco grupos ordenados.")
+                ),
+                div(
+                  class = "method-step",
+                  div(class = "step-number", "3"),
+                  div(class = "step-title", "Resposta"),
+                  div(class = "step-copy", "Comprometimento = gasto essencial dividido pela renda mensal.")
+                ),
+                div(
+                  class = "method-step",
+                  div(class = "step-number", "4"),
+                  div(class = "step-title", "ANOVA"),
+                  div(class = "step-copy", "Testa se as medias dos grupos sao estatisticamente diferentes.")
+                ),
+                div(
+                  class = "method-step",
+                  div(class = "step-number", "5"),
+                  div(class = "step-title", "Diagnostico"),
+                  div(class = "step-copy", "Log e Box-Cox ajudam a avaliar assimetria, residuos e variancias.")
+                )
+              )
             ),
             div(
-              class = "note-box",
-              textOutput("metodologia_quintil")
+              class = "section-panel",
+              h2(class = "section-title", "Como os quintis sao calculados"),
+              uiOutput("metodo_quintis")
             )
           ),
-          div(
-            class = "card-box",
-            h3(class = "section-title", "Interpretacao e limitacoes"),
-            p(
-              class = "formula-line",
-              "A teoria das botas esta sendo usada como lente interpretativa. O dataset nao mede diretamente qualidade, durabilidade ou necessidade de reposicao dos bens comprados."
+
+          tabPanel(
+            "Descritiva Focada",
+            uiOutput("metricas_chave"),
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Comprometimento medio com intervalo de confianca"),
+              p(
+                class = "section-copy",
+                "O grafico usa a variavel original, em percentual da renda, porque esta e a escala mais facil de interpretar na apresentacao."
+              ),
+              div(class = "plot-frame", plotOutput("media_ic_plot", height = "430px"))
             ),
-            p(
-              class = "formula-line",
-              "Os gastos essenciais escolhidos sao uma aproximacao util para o projeto, mas nao esgotam todo o custo de vida. A categoria residual da renda nao separa, neste app, o que foi poupado do que foi gasto em outras rubricas."
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Distribuicao por quintil"),
+              div(class = "plot-frame", plotOutput("boxplot_plot", height = "430px"))
             ),
-            p(
-              class = "formula-line",
-              "Como os dados sao das Filipinas, a conversao para BRL facilita a leitura, mas nao transforma automaticamente o contexto em um retrato da economia brasileira."
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Leitura inicial"),
+              uiOutput("insights_descritivos")
+            )
+          ),
+
+          tabPanel(
+            "ANOVA",
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Resultado inferencial"),
+              uiOutput("anova_resumo")
             ),
-            p(
-              class = "formula-line",
-              "O intervalo de 95% exibido no painel de probabilidade e uma aproximacao baseada na distribuicao normal para a proporcao amostral, servindo como apoio interpretativo."
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Tabela da ANOVA"),
+              tableOutput("anova_table")
+            ),
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Comparacoes pos-teste de Tukey"),
+              p(
+                class = "section-copy",
+                "O Tukey aparece como complemento: ele indica quais pares de quintis mais se diferenciam depois que a ANOVA aponta diferenca geral."
+              ),
+              tableOutput("tukey_table")
+            )
+          ),
+
+          tabPanel(
+            "Transformacoes",
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Por que transformar a variavel"),
+              p(
+                class = "section-copy",
+                "Percentuais de comprometimento costumam ter assimetria e valores extremos. A transformacao logaritmica reduz caudas longas; a Box-Cox procura uma potencia que torne os residuos mais proximos das condicoes usadas pela ANOVA."
+              ),
+              tableOutput("transform_table")
+            ),
+            fluidRow(
+              column(
+                width = 6,
+                div(
+                  class = "section-panel",
+                  h2(class = "section-title", "Residuos vs ajuste"),
+                  div(class = "plot-frame", plotOutput("residual_plot", height = "360px"))
+                )
+              ),
+              column(
+                width = 6,
+                div(
+                  class = "section-panel",
+                  h2(class = "section-title", "QQ-plot dos residuos"),
+                  div(class = "plot-frame", plotOutput("qq_plot", height = "360px"))
+                )
+              )
+            ),
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Interpretacao dos pressupostos"),
+              uiOutput("diagnostico_texto")
+            )
+          ),
+
+          tabPanel(
+            "Tabelas",
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Resumo por quintil"),
+              tableOutput("summary_table")
+            ),
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Faixas de renda por quintil"),
+              tableOutput("quintile_ranges_table")
+            ),
+            div(
+              class = "section-panel",
+              h2(class = "section-title", "Pontos de corte da renda"),
+              tableOutput("cutoff_table")
             )
           )
         )
@@ -1217,927 +1267,397 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-  observe({
-    req(input$tema)
-    session$sendCustomMessage("apply-theme-mode", input$tema)
-  })
-
-  data_path <- reactive({
-    locate_income_file()
-  })
-
   base_data <- reactive({
-    raw_df <- read.csv(data_path(), check.names = FALSE, stringsAsFactors = FALSE)
-
-    missing_columns <- setdiff(required_columns, names(raw_df))
-    validate(
-      need(
-        length(missing_columns) == 0,
-        paste("Colunas ausentes no CSV:", paste(missing_columns, collapse = ", "))
-      )
-    )
-
-    monthly_factor <- input$taxa_cambio / 12
-
-    df <- data.frame(
-      Regiao = raw_df[["Region"]],
-      FonteRenda = raw_df[["Main Source of Income"]],
-      Membros = safe_numeric(raw_df[["Total Number of Family members"]]),
-      Renda = safe_numeric(raw_df[["Total Household Income"]]) * monthly_factor,
-      Alimentacao = safe_numeric(raw_df[["Total Food Expenditure"]]) * monthly_factor,
-      Moradia = safe_numeric(raw_df[["Housing and water Expenditure"]]) * monthly_factor,
-      Transporte = safe_numeric(raw_df[["Transportation Expenditure"]]) * monthly_factor,
-      Saude = safe_numeric(raw_df[["Medical Care Expenditure"]]) * monthly_factor,
-      Educacao = safe_numeric(raw_df[["Education Expenditure"]]) * monthly_factor,
-      stringsAsFactors = FALSE
-    )
-
-    df$Membros[df$Membros <= 0] <- NA_real_
-    df$GastoEssencial <- rowSums(
-      df[, c("Alimentacao", "Moradia", "Transporte", "Saude", "Educacao")],
-      na.rm = TRUE
-    )
-    df$Comprometimento <- ifelse(df$Renda > 0, df$GastoEssencial / df$Renda, NA_real_)
-    df$FolgaFinanceira <- df$Renda - df$GastoEssencial
-    df$RendaPerCapita <- ifelse(df$Membros > 0, df$Renda / df$Membros, NA_real_)
-    df$QuintilCompleto <- build_quintiles(df$Renda)
-
-    df
+    prepare_dataset(raw_income, input$taxa_cambio)
   })
 
   output$regiao_ui <- renderUI({
-    df <- base_data()
-    regions <- sort(unique(df$Regiao))
+    data <- base_data()
+    choices <- sort(unique(data$Regiao))
 
     selectInput(
-      "regioes",
-      "Filtro por regiao",
-      choices = regions,
-      selected = regions,
-      multiple = TRUE
+      "regiao",
+      "Regiao",
+      choices = c("Todas as regioes" = "__all__", choices),
+      selected = "__all__"
     )
   })
 
   output$fonte_ui <- renderUI({
-    df <- base_data()
-    sources <- sort(unique(df$FonteRenda))
+    data <- base_data()
+    choices <- sort(unique(data$FonteRenda))
 
     selectInput(
-      "fontes",
-      "Filtro por fonte de renda",
-      choices = sources,
-      selected = sources,
-      multiple = TRUE
+      "fonte",
+      "Fonte principal de renda",
+      choices = c("Todas as fontes" = "__all__", choices),
+      selected = "__all__"
     )
   })
 
   output$familia_ui <- renderUI({
-    df <- base_data()
-    valid_members <- df$Membros[is.finite(df$Membros)]
-    validate(
-      need(
-        length(valid_members) > 0,
-        "Nao ha tamanhos de familia validos no arquivo para montar este filtro."
-      )
-    )
-    range_members <- range(valid_members)
+    data <- base_data()
+    min_family <- floor(min(data$TamanhoFamilia, na.rm = TRUE))
+    max_family <- ceiling(max(data$TamanhoFamilia, na.rm = TRUE))
 
     sliderInput(
       "familia",
-      "Filtro por tamanho da familia",
-      min = floor(range_members[1]),
-      max = ceiling(range_members[2]),
-      value = c(floor(range_members[1]), ceiling(range_members[2])),
+      "Tamanho da familia",
+      min = min_family,
+      max = max_family,
+      value = c(min_family, max_family),
       step = 1
     )
   })
 
   filtered_data <- reactive({
-    df <- base_data()
+    data <- base_data()
 
-    if (!is.null(input$regioes) && length(input$regioes) > 0) {
-      df <- df[df$Regiao %in% input$regioes, , drop = FALSE]
+    if (!is.null(input$regiao) && input$regiao != "__all__") {
+      data <- data[data$Regiao == input$regiao, ]
     }
 
-    if (!is.null(input$fontes) && length(input$fontes) > 0) {
-      df <- df[df$FonteRenda %in% input$fontes, , drop = FALSE]
+    if (!is.null(input$fonte) && input$fonte != "__all__") {
+      data <- data[data$FonteRenda == input$fonte, ]
     }
 
-    if (!is.null(input$familia) && length(input$familia) == 2) {
-      df <- df[
-        !is.na(df$Membros) &
-          df$Membros >= input$familia[1] &
-          df$Membros <= input$familia[2],
-        ,
-        drop = FALSE
+    if (!is.null(input$familia)) {
+      data <- data[
+        data$TamanhoFamilia >= input$familia[1] &
+          data$TamanhoFamilia <= input$familia[2],
       ]
     }
 
-    validate(
-      need(
-        nrow(df) >= 5,
-        "Os filtros selecionados deixaram poucas observacoes. Amplie os filtros para continuar."
-      )
-    )
-
-    df$Quintil <- if (identical(input$base_quintil, "filtrada")) {
-      build_quintiles(df$Renda)
+    if (input$base_quintil == "filtered") {
+      data$Quintil <- build_quintiles(data$Renda)
     } else {
-      factor(df$QuintilCompleto, levels = quintil_labels)
+      data$Quintil <- data$QuintilBaseCompleta
     }
 
-    df
+    data$Quintil <- factor(data$Quintil, levels = quintil_labels, ordered = TRUE)
+    data <- data[!is.na(data$Quintil), ]
+    data
   })
 
-  summary_df <- reactive({
-    build_summary_table(filtered_data(), input$medida_resumo)
-  })
-
-  quintile_ranges_df <- reactive({
-    build_quintile_ranges(filtered_data())
-  })
-
-  cutoff_df <- reactive({
-    renda_base <- if (identical(input$base_quintil, "filtrada")) {
-      filtered_data()$Renda
-    } else {
-      base_data()$Renda
-    }
-
-    build_cutoff_table(renda_base)
-  })
-
-  output$limiar_prob_ui <- renderUI({
-    df <- filtered_data()
-    variable_name <- input$variavel_prob
-    values <- df[[variable_name]]
-    values <- values[is.finite(values)]
-
+  valid_filtered_data <- reactive({
+    data <- filtered_data()
     validate(
-      need(length(values) > 1, "Nao ha valores suficientes para calcular a probabilidade.")
+      need(nrow(data) >= 30, "Use filtros menos restritivos: a analise precisa de pelo menos 30 familias."),
+      need(length(unique(data$Quintil)) >= 2, "A ANOVA precisa de pelo menos dois quintis presentes.")
     )
+    data
+  })
 
-    min_value <- min(values)
-    max_value <- max(values)
-    median_value <- median(values)
+  summary_data <- reactive({
+    summarize_quintiles(valid_filtered_data())
+  })
 
-    if (identical(min_value, max_value)) {
-      max_value <- min_value + if (is_percent_indicator(variable_name)) 0.01 else 1
-    }
+  anova_result <- reactive({
+    run_anova_analysis(valid_filtered_data(), input$transformacao_anova)
+  })
 
-    step_value <- slider_step_for(min_value, max_value, variable_name)
-    slider_min <- floor(min_value / step_value) * step_value
-    slider_max <- ceiling(max_value / step_value) * step_value
-    current_value <- if (!is.null(input$limiar_prob)) input$limiar_prob else median_value
-    current_value <- round_to_step(current_value, step_value)
-    current_value <- min(max(current_value, slider_min), slider_max)
+  output$metodo_quintis <- renderUI({
+    data <- valid_filtered_data()
+    mode_text <- ifelse(
+      input$base_quintil == "filtered",
+      "Os quintis estao sendo recalculados depois dos filtros.",
+      "Os quintis usam a base completa e os filtros apenas selecionam observacoes dentro desses grupos."
+    )
 
     tagList(
-      sliderInput(
-        "limiar_prob",
-        "Limiar do evento probabilistico",
-        min = slider_min,
-        max = slider_max,
-        value = current_value,
-        step = step_value
+      p(
+        class = "section-copy",
+        "As familias sao ordenadas pela renda mensal domiciliar estimada. Depois, a lista ordenada e dividida em cinco blocos com quantidade semelhante de familias. Assim, Q1 representa as familias de menor renda dentro do criterio escolhido, e Q5 representa as de maior renda."
       ),
-      div(
-        class = "small-note",
-        paste("Valor atual:", format_indicator_value(current_value, variable_name))
+      tags$ul(
+        class = "insight-list",
+        tags$li(paste0("Base analisada agora: ", format_number_br(nrow(data), 0), " familias.")),
+        tags$li(mode_text),
+        tags$li("Essa definicao evita chamar grupos de forma moralizante e deixa claro que se trata de posicao relativa na distribuicao de renda.")
       )
     )
   })
 
-  probability_stats <- reactive({
-    req(input$variavel_prob, input$operador_prob)
-    df <- filtered_data()
-    values <- df[[input$variavel_prob]]
-    valid_values <- values[is.finite(values)]
-    req(length(valid_values) > 0)
-    threshold_value <- if (!is.null(input$limiar_prob)) input$limiar_prob else median(valid_values)
-    stats <- compute_probability_stats(values, input$operador_prob, threshold_value)
-    stats$threshold <- threshold_value
-    stats
-  })
+  output$metricas_chave <- renderUI({
+    data <- valid_filtered_data()
+    summary <- summary_data()
+    result <- anova_result()
 
-  output$summary_note <- renderText({
-    paste(
-      stat_label(input$medida_resumo),
-      "calculada para cada indicador dentro de cada quintil de renda."
-    )
-  })
-
-  output$quintil_note <- renderText({
-    if (identical(input$base_quintil, "filtrada")) {
-      "Os quintis foram recalculados depois dos filtros, ordenando a renda mensal e dividindo as observacoes em 5 grupos com tamanhos quase iguais."
-    } else {
-      "Os quintis foram definidos na base completa e mantidos mesmo apos os filtros, preservando a comparacao com a distribuicao geral."
-    }
-  })
-
-  output$metodologia_quintil <- renderText({
-    sample_size <- if (identical(input$base_quintil, "filtrada")) nrow(filtered_data()) else nrow(base_data())
-
-    paste0(
-      "Quintis neste app sao grupos de frequencia. A renda mensal e ordenada da menor para a maior e o conjunto analisado e dividido em 5 blocos de tamanho o mais equilibrado possivel. ",
-      "Com a configuracao atual, a base usada para definir os quintis tem ",
-      format(sample_size, big.mark = ".", decimal.mark = ","),
-      " familias."
-    )
-  })
-
-  output$amostra_card <- renderUI({
-    df <- filtered_data()
-    selected_regions <- if (!is.null(input$regioes)) length(input$regioes) else 0
-    selected_sources <- if (!is.null(input$fontes)) length(input$fontes) else 0
-    family_range <- if (!is.null(input$familia) && length(input$familia) == 2) {
-      paste0(input$familia[1], " a ", input$familia[2], " moradores")
-    } else {
-      "Nao definido"
-    }
+    q1 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[1]]
+    q5 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[5]]
+    gap <- q1 - q5
 
     div(
-      class = "card-box",
-      h3(class = "section-title", "Leitura atual da amostra"),
-      p(
-        class = "small-note",
-        paste0(
-          "A amostra filtrada contem ",
-          format(nrow(df), big.mark = ".", decimal.mark = ","),
-          " familias, cobrindo ",
-          format(selected_regions, big.mark = ".", decimal.mark = ","),
-          " regioes selecionadas e ",
-          format(selected_sources, big.mark = ".", decimal.mark = ","),
-          " fontes de renda. O filtro de tamanho familiar esta em ",
-          family_range,
-          "."
-        )
+      class = "metric-grid",
+      div(
+        class = "metric-card",
+        div(class = "metric-label", "Familias analisadas"),
+        div(class = "metric-value", format_number_br(nrow(data), 0)),
+        div(class = "metric-note", "Apos filtros e remocao de valores invalidos.")
       ),
-      p(
-        class = "small-note",
-        paste0(
-          "Os quintis estao sendo calculados com base ",
-          if (identical(input$base_quintil, "filtrada")) {
-            "na amostra filtrada"
-          } else {
-            "na base completa"
-          },
-          ", usando taxa de cambio PHP -> BRL de ",
-          formatC(input$taxa_cambio, format = "f", digits = 3, decimal.mark = ","),
-          "."
-        )
+      div(
+        class = "metric-card",
+        div(class = "metric-label", "Diferenca Q1 - Q5"),
+        div(class = "metric-value", format_pct(gap)),
+        div(class = "metric-note", "Pontos percentuais de comprometimento medio.")
+      ),
+      div(
+        class = "metric-card",
+        div(class = "metric-label", "p-valor da ANOVA"),
+        div(class = "metric-value", format_pvalue(result$p_value)),
+        div(class = "metric-note", paste0("Transformacao: ", result$transform_label, "."))
+      ),
+      div(
+        class = "metric-card",
+        div(class = "metric-label", "Tamanho do efeito"),
+        div(class = "metric-value", format_pct(result$eta_squared)),
+        div(class = "metric-note", paste0("eta^2 ", interpret_eta(result$eta_squared), "."))
       )
     )
   })
 
-  output$metric_cards <- renderUI({
-    df <- filtered_data()
-    stat <- input$medida_resumo
-    selected_indicator <- input$indicador_principal
-    selected_value <- calc_stat(df[[selected_indicator]], stat)
-    renda_value <- calc_stat(df$Renda, stat)
-    prob_stats <- probability_stats()
+  output$media_ic_plot <- renderPlot({
+    summary <- summary_data()
 
-    fluidRow(
-      column(
-        3,
-        div(
-          class = "metric-card",
-          div(class = "metric-label", "Familias analisadas"),
-          div(class = "metric-value", format(nrow(df), big.mark = ".", decimal.mark = ",")),
-          div(class = "metric-help", "Total de observacoes apos aplicar os filtros atuais.")
-        )
-      ),
-      column(
-        3,
-        div(
-          class = "metric-card",
-          div(class = "metric-label", paste(stat_label(stat), "de", indicator_label(selected_indicator))),
-          div(class = "metric-value", format_indicator_value(selected_value, selected_indicator)),
-          div(class = "metric-help", "Indicador atualmente exibido no grafico principal.")
-        )
-      ),
-      column(
-        3,
-        div(
-          class = "metric-card",
-          div(class = "metric-label", paste(stat_label(stat), "da renda mensal")),
-          div(class = "metric-value", format_brl(renda_value)),
-          div(class = "metric-help", "Valor mensal domiciliar convertido para BRL.")
-        )
-      ),
-      column(
-        3,
-        div(
-          class = "metric-card",
-          div(class = "metric-label", "Probabilidade do evento"),
-          div(class = "metric-value", format_pct(prob_stats$prob)),
-          div(
-            class = "metric-help",
-            paste0(
-              indicator_label(input$variavel_prob), " ",
-              input$operador_prob, " ",
-              format_indicator_value(prob_stats$threshold, input$variavel_prob)
-            )
-          )
-        )
-      )
-    )
-  })
-
-  output$comprometimento_plot <- renderPlot({
-    df <- filtered_data()
-    stat <- input$medida_resumo
-    selected_indicator <- input$indicador_principal
-    pal <- plot_palette(input$tema)
-    quintil_colors_values <- quintil_colors(input$tema)
-
-    values <- data.frame(
-      Quintil = factor(quintil_labels, levels = quintil_labels),
-      Valor = vapply(
-        quintil_labels,
-        function(group_label) {
-          calc_stat(df[df$Quintil == group_label, selected_indicator], stat)
-        },
-        numeric(1)
-      )
-    )
-
-    if (all(!is.finite(values$Valor))) {
-      return(
-        empty_plot(
-          title = paste(stat_label(stat), "de", indicator_label(selected_indicator), "por quintil"),
-          subtitle = "Nao ha dados suficientes para exibir este grafico com os filtros atuais.",
-          theme_mode = input$tema,
-          x = "Quintil de renda",
-          y = indicator_label(selected_indicator)
-        )
-      )
-    }
-
-    base_plot <- ggplot(values, aes(x = Quintil, y = Valor, fill = Quintil)) +
-      geom_col(width = 0.72, alpha = 0.9, colour = pal$panel) +
-      geom_text(
-        aes(label = ifelse(is.na(Valor), "NA", format_indicator_value(Valor, selected_indicator))),
-        vjust = -0.45,
-        colour = pal$text,
-        fontface = "bold",
-        size = 4.4
-      ) +
-      scale_fill_manual(
-        values = quintil_colors_values,
-        drop = FALSE
-      ) +
-      labs(
-        title = paste(stat_label(stat), "de", indicator_label(selected_indicator), "por quintil"),
-        subtitle = "O grafico principal responde dinamicamente ao indicador selecionado na lateral.",
-        x = "Quintil de renda",
-        y = indicator_label(selected_indicator)
-      ) +
-      quintil_scale_x() +
-      plot_theme(input$tema) +
-      theme(
-        legend.position = "none",
-        axis.text.x = element_text(size = 12.6, lineheight = 0.95, face = "bold", margin = margin(t = 8))
-      )
-
-    if (is_percent_indicator(selected_indicator)) {
-      base_plot + scale_y_continuous(labels = percent_format(accuracy = 1))
-    } else {
-      base_plot + scale_y_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-    }
-  })
-
-  output$grafico_secundario_plot <- renderPlot({
-    df <- filtered_data()
-    pal <- plot_palette(input$tema)
-    selected_indicator <- input$indicador_principal
-    quintil_colors_values <- quintil_colors(input$tema)
-
-    if (identical(input$grafico_secundario, "composicao")) {
-      shares_df <- build_category_share_table(df)
-      if (!any(is.finite(shares_df$Participacao))) {
-        return(
-          empty_plot(
-            title = "Composicao media da cesta essencial por quintil",
-            subtitle = "Nao ha participacoes suficientes para montar a composicao com os filtros atuais.",
-            theme_mode = input$tema,
-            x = "Quintil de renda",
-            y = "Participacao dentro do gasto essencial"
-          )
-        )
-      }
-
-      return(
-        ggplot(shares_df, aes(x = Quintil, y = Participacao, fill = Categoria)) +
-          geom_col(position = "fill", width = 0.72, colour = pal$panel) +
-          scale_y_continuous(labels = percent_format(accuracy = 1)) +
-        scale_fill_manual(
-          values = c(
-            Alimentacao = "#14B8A6",
-              Moradia = "#3B82F6",
-              Transporte = "#F59E0B",
-              Saude = "#EF4444",
-              Educacao = "#8B5CF6"
-            )
-          ) +
-          labs(
-            title = "Composicao media da cesta essencial por quintil",
-            subtitle = "Cada barra soma 100% do gasto essencial medio do quintil.",
-            x = "Quintil de renda",
-            y = "Participacao dentro do gasto essencial"
-          ) +
-          quintil_scale_x() +
-          plot_theme(input$tema) +
-          theme(
-            axis.text.x = element_text(size = 12.2, lineheight = 0.95, face = "bold", margin = margin(t = 8))
-          )
-      )
-    }
-
-    if (identical(input$grafico_secundario, "dispersao")) {
-      scatter_indicator <- if (identical(selected_indicator, "Renda")) {
-        "GastoEssencial"
-      } else {
-        selected_indicator
-      }
-      scatter_df <- data.frame(
-        Renda = df$Renda,
-        Indicador = df[[scatter_indicator]],
-        Quintil = df$Quintil
-      )
-      scatter_df <- scatter_df[is.finite(scatter_df$Renda) & is.finite(scatter_df$Indicador), , drop = FALSE]
-
-      if (nrow(scatter_df) == 0) {
-        return(
-          empty_plot(
-            title = paste("Dispersao entre renda e", tolower(indicator_label(scatter_indicator))),
-            subtitle = "Nao ha pontos suficientes para montar a dispersao com os filtros atuais.",
-            theme_mode = input$tema,
-            x = "Renda mensal domiciliar",
-            y = indicator_label(scatter_indicator)
-          )
-        )
-      }
-
-      base_plot <- ggplot(
-        scatter_df,
-        aes(x = Renda, y = Indicador, colour = Quintil)
-      ) +
-        geom_point(alpha = 0.55, size = 2) +
-        scale_colour_manual(
-          values = quintil_colors_values,
-          drop = FALSE
-        ) +
-        labs(
-          title = paste("Dispersao entre renda e", tolower(indicator_label(scatter_indicator))),
-          subtitle = "Cada ponto representa um domicilio filtrado; a linha destaca a tendencia geral.",
-          x = "Renda mensal domiciliar",
-          y = indicator_label(scatter_indicator)
-        ) +
-        plot_theme(input$tema)
-
-      if (nrow(scatter_df) >= 2 && length(unique(scatter_df$Renda)) > 1) {
-        base_plot <- base_plot +
-          geom_smooth(se = FALSE, linewidth = 1.1, colour = pal$accent_alt)
-      }
-
-      if (is_percent_indicator(scatter_indicator)) {
-        return(
-          base_plot +
-            scale_x_continuous(labels = label_number(big.mark = ".", decimal.mark = ",")) +
-            scale_y_continuous(labels = percent_format(accuracy = 1))
-        )
-      }
-
-      return(
-        base_plot +
-          scale_x_continuous(labels = label_number(big.mark = ".", decimal.mark = ",")) +
-          scale_y_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-      )
-    }
-
-    region_summary <- aggregate(
-      df[[selected_indicator]],
-      by = list(Regiao = df$Regiao),
-      FUN = function(x) calc_stat(x, input$medida_resumo)
-    )
-    names(region_summary)[2] <- "Valor"
-    region_summary <- region_summary[is.finite(region_summary$Valor), , drop = FALSE]
-
-    if (nrow(region_summary) == 0) {
-      return(
-        empty_plot(
-          title = paste("Top 10 regioes em", tolower(indicator_label(selected_indicator))),
-          subtitle = "Nao ha regioes com dados suficientes para esse indicador.",
-          theme_mode = input$tema,
-          x = indicator_label(selected_indicator),
-          y = "Regiao"
-        )
-      )
-    }
-
-    region_summary <- region_summary[order(region_summary$Valor, decreasing = TRUE), , drop = FALSE]
-    region_summary <- head(region_summary, 10)
-    region_summary$Regiao <- factor(region_summary$Regiao, levels = rev(region_summary$Regiao))
-
-    base_plot <- ggplot(region_summary, aes(x = Regiao, y = Valor, fill = Valor)) +
-      geom_col(width = 0.74, show.legend = FALSE) +
-      coord_flip() +
-      scale_fill_gradient(low = pal$accent_soft, high = pal$accent_alt) +
-      labs(
-        title = paste("Top 10 regioes em", tolower(indicator_label(selected_indicator))),
-        subtitle = paste("Ordenacao pela", tolower(stat_label(input$medida_resumo)), "do indicador selecionado."),
-        x = "Regiao",
-        y = indicator_label(selected_indicator)
-      ) +
-      plot_theme(input$tema)
-
-    if (is_percent_indicator(selected_indicator)) {
-      base_plot + scale_y_continuous(labels = percent_format(accuracy = 1))
-    } else {
-      base_plot + scale_y_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-    }
-  })
-
-  output$ecdf_plot <- renderPlot({
-    df <- filtered_data()
-    stats <- probability_stats()
-    pal <- plot_palette(input$tema)
-    variable_name <- input$variavel_prob
-    quintil_colors_values <- quintil_colors(input$tema)
-    ecdf_df <- df[, c("Quintil", variable_name)]
-    names(ecdf_df)[2] <- "Valor"
-    ecdf_df <- ecdf_df[is.finite(ecdf_df$Valor), , drop = FALSE]
-
-    if (nrow(ecdf_df) == 0) {
-      return(
-        empty_plot(
-          title = paste("Curva acumulada empirica de", indicator_label(variable_name)),
-          subtitle = "Nao ha observacoes suficientes para construir a curva acumulada.",
-          theme_mode = input$tema,
-          x = indicator_label(variable_name),
-          y = "Probabilidade acumulada observada"
-        )
-      )
-    }
-
-    base_plot <- ggplot(ecdf_df, aes(x = Valor, colour = Quintil)) +
-      stat_ecdf(linewidth = 1.15, alpha = 0.95) +
-      geom_vline(
-        xintercept = stats$threshold,
+    ggplot(summary, aes(x = Quintil, y = MediaComprometimento, color = Quintil)) +
+      geom_hline(yintercept = 0, color = "#8e897d", linewidth = 0.6) +
+      geom_line(aes(group = 1), color = "#333333", linewidth = 0.9, alpha = 0.6) +
+      geom_pointrange(
+        aes(ymin = ICInferior, ymax = ICSuperior),
         linewidth = 1.1,
-        linetype = "dashed",
-        colour = pal$accent_alt
+        size = 1.2
       ) +
-      scale_colour_manual(
-        values = quintil_colors_values,
-        drop = FALSE
+      geom_text(
+        aes(label = format_pct(MediaComprometimento)),
+        vjust = -1.15,
+        color = "#171717",
+        fontface = "bold",
+        size = 5.8
       ) +
-      scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+      scale_color_manual(values = quintil_colors, drop = FALSE) +
+      quintil_scale_x() +
+        scale_y_continuous(
+          limits = c(0, 1),
+          labels = percent_format(accuracy = 1, decimal.mark = ",")
+        ) +
       labs(
-        title = paste("Curva acumulada empirica de", indicator_label(variable_name)),
-        subtitle = "A linha pontilhada marca o limiar do evento probabilistico selecionado.",
-        x = indicator_label(variable_name),
-        y = "Probabilidade acumulada observada"
+        title = "Comprometimento medio da renda por quintil",
+        subtitle = "Pontos indicam medias; barras verticais indicam intervalo de confianca de 95%.",
+        x = "Quintil de renda",
+        y = "Comprometimento da renda"
       ) +
-      plot_theme(input$tema) +
-      theme(legend.position = "bottom")
-
-    base_plot + axis_scale_for(variable_name, "x")
-  })
-
-  output$probabilidade_card <- renderUI({
-    stats <- probability_stats()
-    variable_name <- input$variavel_prob
-    event_text <- paste0(
-      "P(",
-      indicator_label(variable_name), " ",
-      input$operador_prob, " ",
-      format_indicator_value(stats$threshold, variable_name),
-      ")"
-    )
-
-    div(
-      class = "card-box prob-card",
-      div(class = "prob-title", "Probabilidade empirica"),
-      div(class = "prob-value", format_pct(stats$prob)),
-      div(class = "prob-track", div(class = "prob-fill", style = paste0("width:", round(100 * stats$prob, 1), "%;"))),
-      div(class = "prob-detail", event_text),
-      div(
-        class = "prob-detail",
-        paste0(
-          stats$success, " de ",
-          format(stats$n, big.mark = ".", decimal.mark = ","),
-          " familias da amostra filtrada atendem ao evento."
-        )
-      ),
-      div(
-        class = "prob-detail",
-        paste0(
-          "Intervalo aproximado de 95%: ",
-          format_pct(stats$lower), " a ", format_pct(stats$upper), "."
-        )
-      )
-    )
+      plot_theme()
   })
 
   output$boxplot_plot <- renderPlot({
-    df <- filtered_data()
-    selected_indicator <- input$indicador_principal
-    quintil_colors_values <- quintil_colors(input$tema)
-    box_df <- data.frame(
-      Quintil = df$Quintil,
-      Indicador = df[[selected_indicator]]
-    )
-    box_df <- box_df[is.finite(box_df$Indicador), , drop = FALSE]
+    data <- valid_filtered_data()
 
-    if (nrow(box_df) == 0) {
-      return(
-        empty_plot(
-          title = paste("Dispersao", tolower(indicator_label(selected_indicator))),
-          subtitle = "Nao ha observacoes suficientes para montar o boxplot.",
-          theme_mode = input$tema,
-          x = "Quintil de renda",
-          y = indicator_label(selected_indicator)
-        )
-      )
-    }
-
-    base_plot <- ggplot(box_df, aes(x = Quintil, y = Indicador, fill = Quintil)) +
-      geom_boxplot(alpha = 0.82, outlier.alpha = 0.22, width = 0.72) +
-      scale_fill_manual(
-        values = quintil_colors_values,
-        drop = FALSE
+    plot <- ggplot(data, aes(x = Quintil, y = Comprometimento, fill = Quintil)) +
+      geom_boxplot(width = 0.62, outlier.alpha = 0.18, color = "#222222", alpha = 0.9) +
+      stat_summary(
+        fun = mean,
+        geom = "point",
+        shape = 23,
+        size = 3.4,
+        fill = "#fbfaf4",
+        color = "#111111"
       ) +
-      labs(
-        title = paste("Dispersao", tolower(indicator_label(selected_indicator)), "por quintil"),
-        subtitle = "O boxplot ajuda a comparar variacao interna e valores extremos.",
-        x = "Quintil de renda",
-        y = indicator_label(selected_indicator)
-      ) +
+      scale_fill_manual(values = quintil_colors, drop = FALSE) +
       quintil_scale_x() +
-      plot_theme(input$tema) +
-      theme(
-        legend.position = "none",
-        axis.text.x = element_text(size = 12.4, lineheight = 0.95, face = "bold", margin = margin(t = 8))
-      )
-
-    if (is_percent_indicator(selected_indicator)) {
-      base_plot + scale_y_continuous(labels = percent_format(accuracy = 1))
-    } else {
-      base_plot + scale_y_continuous(labels = label_number(big.mark = ".", decimal.mark = ","))
-    }
-  })
-
-  output$densidade_plot <- renderPlot({
-    df <- filtered_data()
-    variable_name <- input$indicador_principal
-    quintil_colors_values <- quintil_colors(input$tema)
-    density_df <- df[, c("Quintil", variable_name)]
-    names(density_df)[2] <- "Valor"
-    density_df <- density_df[is.finite(density_df$Valor), , drop = FALSE]
-    density_df <- do.call(
-      rbind,
-      lapply(
-        quintil_labels,
-        function(group_label) {
-          subset_df <- density_df[density_df$Quintil == group_label, , drop = FALSE]
-          if (nrow(subset_df) < 2 || !has_variation(subset_df$Valor)) {
-            return(NULL)
-          }
-          subset_df
-        }
-      )
-    )
-
-    if (is.null(density_df) || nrow(density_df) == 0) {
-      return(
-        empty_plot(
-          title = paste("Densidade", tolower(indicator_label(variable_name))),
-          subtitle = "Nao ha variacao suficiente para estimar densidades com os filtros atuais.",
-          theme_mode = input$tema,
-          x = indicator_label(variable_name),
-          y = "Densidade"
-        )
-      )
-    }
-
-    base_plot <- ggplot(density_df, aes(x = Valor, y = after_stat(scaled), fill = Quintil, colour = Quintil)) +
-      geom_density(alpha = 0.16, linewidth = 0.9) +
-      scale_fill_manual(
-        values = quintil_colors_values,
-        drop = FALSE
-      ) +
-      scale_colour_manual(
-        values = quintil_colors_values,
-        drop = FALSE
-      ) +
-      labs(
-        title = paste("Densidade", tolower(indicator_label(variable_name))),
-        subtitle = "As curvas mostram a concentracao relativa do indicador dentro de cada quintil.",
-        x = indicator_label(variable_name),
-        y = "Densidade relativa"
-      ) +
       scale_y_continuous(
-        labels = label_number(accuracy = 0.1, decimal.mark = ","),
-        limits = c(0, 1.05)
+        labels = percent_format(accuracy = 1, decimal.mark = ",")
       ) +
-      plot_theme(input$tema)
-
-    base_plot + axis_scale_for(variable_name, "x")
-  })
-
-  output$relacao_plot <- renderPlot({
-    df <- filtered_data()
-    pal <- plot_palette(input$tema)
-    quintil_colors_values <- quintil_colors(input$tema)
-    validate(need(input$relacao_x != input$relacao_y, "Escolha duas variaveis diferentes para analisar a relacao."))
-
-    relation_df <- data.frame(
-      X = df[[input$relacao_x]],
-      Y = df[[input$relacao_y]],
-      Quintil = df$Quintil
-    )
-    relation_df <- relation_df[is.finite(relation_df$X) & is.finite(relation_df$Y), , drop = FALSE]
-
-    validate(
-      need(
-        nrow(relation_df) > 0,
-        "Nao ha pares de observacoes suficientes para analisar essa relacao."
-      )
-    )
-
-    corr_value <- cor(relation_df$X, relation_df$Y, use = "complete.obs")
-
-    base_plot <- ggplot(relation_df, aes(x = X, y = Y, colour = Quintil)) +
-      geom_point(alpha = 0.58, size = 2.1) +
-      scale_colour_manual(
-        values = quintil_colors_values,
-        drop = FALSE
-      ) +
+      coord_cartesian(ylim = c(0, 2.5)) +
       labs(
-        title = paste("Relacao entre", tolower(indicator_label(input$relacao_x)), "e", tolower(indicator_label(input$relacao_y))),
-        subtitle = paste0("Correlacao linear observada: ", formatC(corr_value, format = "f", digits = 2, decimal.mark = ","), "."),
-        x = indicator_label(input$relacao_x),
-        y = indicator_label(input$relacao_y)
+        title = "Dispersao do comprometimento por quintil",
+        subtitle = "A caixa mostra mediana e quartis; o losango claro marca a media.",
+        x = "Quintil de renda",
+        y = "Comprometimento da renda"
       ) +
-      plot_theme(input$tema)
+      plot_theme()
 
-    if (nrow(relation_df) >= 2 && length(unique(relation_df$X)) > 1) {
-      base_plot <- base_plot +
-        geom_smooth(method = "lm", se = FALSE, linewidth = 1.05, colour = pal$accent_alt)
+    if (isTRUE(input$mostrar_pontos)) {
+      plot <- plot +
+        geom_jitter(
+          aes(color = Quintil),
+          width = 0.15,
+          alpha = 0.12,
+          size = 1.1,
+          show.legend = FALSE
+        ) +
+        scale_color_manual(values = quintil_colors, drop = FALSE)
     }
 
-    base_plot +
-      axis_scale_for(input$relacao_x, "x") +
-      axis_scale_for(input$relacao_y, "y")
+    plot
   })
 
-  output$correlacao_plot <- renderPlot({
-    df <- filtered_data()
-    pal <- plot_palette(input$tema)
-    corr_long <- build_correlation_long(df)
-    corr_long$Correlacao[!is.finite(corr_long$Correlacao)] <- NA_real_
+  output$insights_descritivos <- renderUI({
+    summary <- summary_data()
+    q1 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[1]]
+    q5 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[5]]
+    gap <- q1 - q5
 
-    ggplot(corr_long, aes(x = VarX, y = VarY, fill = Correlacao)) +
-      geom_tile(colour = pal$panel, linewidth = 0.55) +
-      geom_text(
-        aes(label = ifelse(is.na(Correlacao), "NA", formatC(Correlacao, format = "f", digits = 2, decimal.mark = ","))),
-        colour = pal$text,
-        size = 3.0,
-        fontface = "bold"
-      ) +
-      scale_fill_gradient2(
-        low = "#2563EB",
-        mid = pal$panel,
-        high = "#F59E0B",
-        midpoint = 0,
-        limits = c(-1, 1),
-        na.value = pal$grid
-      ) +
-      labs(
-        title = "Mapa de correlacoes",
-        subtitle = "Correlacoes lineares entre os principais indicadores.",
-        x = NULL,
-        y = NULL
-      ) +
-      plot_theme(input$tema) +
-      theme(
-        axis.text.x = element_text(size = 4, face = "bold", lineheight = 0.9, margin = margin(t = 8)),
-        axis.text.y = element_text(size = 6, face = "bold", lineheight = 0.9, margin = margin(r = 8)),
-        legend.position = "right",
-        legend.text = element_text(size = 10.8),
-        legend.key.height = grid::unit(20, "pt"),
-        panel.grid = element_blank(),
-        plot.margin = margin(t = 12, r = 18, b = 8, l = 12)
-      )
-  })
-
-  output$insights_ui <- renderUI({
-    df <- filtered_data()
-    selected_indicator <- input$indicador_principal
-    prob_stats <- probability_stats()
-    mean_comp <- vapply(
-      quintil_labels,
-      function(group_label) {
-        calc_stat(df[df$Quintil == group_label, "Comprometimento"], "mean")
-      },
-      numeric(1)
-    )
-    names(mean_comp) <- quintil_labels
-
-    comp_low <- mean_comp[[quintil_labels[1]]]
-    comp_high <- mean_comp[[quintil_labels[5]]]
-    comp_gap <- comp_high - comp_low
-    food_low <- safe_ratio(
-      mean(df[df$Quintil == quintil_labels[1], "Alimentacao"], na.rm = TRUE),
-      mean(df[df$Quintil == quintil_labels[1], "Renda"], na.rm = TRUE)
-    )
-    food_high <- safe_ratio(
-      mean(df[df$Quintil == quintil_labels[5], "Alimentacao"], na.rm = TRUE),
-      mean(df[df$Quintil == quintil_labels[5], "Renda"], na.rm = TRUE)
-    )
-    selected_low <- calc_stat(df[df$Quintil == quintil_labels[1], selected_indicator], "mean")
-    selected_high <- calc_stat(df[df$Quintil == quintil_labels[5], selected_indicator], "mean")
+    higher_group <- summary$Quintil[which.max(summary$MediaComprometimento)]
+    lower_group <- summary$Quintil[which.min(summary$MediaComprometimento)]
 
     tagList(
-      p(
-        class = "small-note",
-        paste0(
-          "No grupo dos ", quintil_labels[1], ", o comprometimento medio e de ",
-          format_pct(comp_low),
-          ", enquanto no grupo dos ", quintil_labels[5], " ele fica em ",
-          format_pct(comp_high), "."
+      tags$ul(
+        class = "insight-list",
+        tags$li(paste0(
+          "No recorte atual, o Q1 compromete em media ",
+          format_pct(q1),
+          " da renda; o Q5 compromete ",
+          format_pct(q5),
+          ". A diferenca Q1 - Q5 e ",
+          format_pct(gap),
+          "."
+        )),
+        tags$li(paste0(
+          "Maior media observada: ",
+          higher_group,
+          ". Menor media observada: ",
+          lower_group,
+          "."
+        )),
+        tags$li(
+          "Essa leitura descritiva prepara o teste inferencial: a ANOVA pergunta se as diferencas entre medias sao maiores do que esperariamos pela variabilidade interna dos grupos."
         )
-      ),
-      p(
-        class = "small-note",
-        paste0(
-          "A alimentacao pesa mais para os grupos de menor renda: ela representa em media ",
-          format_pct(food_low),
-          " da renda do primeiro quintil contra ",
-          format_pct(food_high),
-          " no ultimo quintil."
-        )
-      ),
-      p(
-        class = "small-note",
-        paste0(
-          "A diferenca entre os extremos do comprometimento e de ",
-          format_pct(abs(comp_gap)),
-          ", o que reforca a ideia de que familias com menor renda tem menos margem para absorver gastos essenciais."
-        )
-      ),
-      p(
-        class = "small-note",
-        paste0(
-          "Na leitura probabilistica da amostra filtrada, a chance empirica de uma familia apresentar ",
-          indicator_label(input$variavel_prob), " ",
-          input$operador_prob, " ",
-          format_indicator_value(prob_stats$threshold, input$variavel_prob),
-          " e de ", format_pct(prob_stats$prob), "."
-        )
-      ),
-      if (!identical(selected_indicator, "Comprometimento")) {
-        p(
-          class = "small-note",
-          paste0(
-            "No indicador selecionado agora, ",
-            indicator_label(selected_indicator),
-            ", a media passa de ",
-            format_indicator_value(selected_low, selected_indicator),
-            " no primeiro grupo para ",
-            format_indicator_value(selected_high, selected_indicator),
-            " no ultimo grupo de renda."
-          )
-        )
-      }
+      )
     )
   })
 
-  output$resumo_tabela <- renderTable({
-    summary_table <- summary_df()
-    summary_table[money_columns] <- lapply(summary_table[money_columns], format_brl)
-    summary_table$Comprometimento <- format_pct(summary_table$Comprometimento)
-    summary_table
-  }, striped = TRUE, hover = TRUE, bordered = TRUE, rownames = FALSE)
+  output$anova_resumo <- renderUI({
+    result <- anova_result()
+    summary <- summary_data()
+    q1 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[1]]
+    q5 <- summary$MediaComprometimento[summary$Quintil == quintil_labels[5]]
+    gap <- q1 - q5
 
-  output$quintis_tabela <- renderTable({
-    quintile_table <- quintile_ranges_df()
-    quintile_table$Familias <- format(quintile_table$Familias, big.mark = ".", decimal.mark = ",")
-    quintile_table[, c("Renda minima", "Renda mediana", "Renda maxima")] <- lapply(
-      quintile_table[, c("Renda minima", "Renda mediana", "Renda maxima")],
-      format_brl
+    decision <- ifelse(
+      result$p_value < 0.05,
+      "Rejeitamos H0 ao nivel de 5%: ha evidencia de diferenca entre medias de comprometimento.",
+      "Nao rejeitamos H0 ao nivel de 5%: a evidencia nao e suficiente para afirmar diferenca entre medias."
     )
-    quintile_table
-  }, striped = TRUE, hover = TRUE, bordered = TRUE, rownames = FALSE)
 
-  output$cutoffs_tabela <- renderTable({
-    cutoff_table <- cutoff_df()
-    cutoff_table$`Renda mensal` <- format_brl(cutoff_table$`Renda mensal`)
-    cutoff_table
-  }, striped = TRUE, hover = TRUE, bordered = TRUE, rownames = FALSE)
+    tagList(
+      div(class = "result-badge", paste0("F = ", format_number_br(result$f_value, 2), " | p = ", format_pvalue(result$p_value))),
+      p(
+        class = "section-copy",
+        paste0(
+          decision,
+          " O tamanho de efeito eta^2 e ",
+          format_pct(result$eta_squared),
+          ", interpretado aqui como ",
+          interpret_eta(result$eta_squared),
+          "."
+        )
+      ),
+      tags$ul(
+        class = "insight-list",
+        tags$li(paste0("Variavel resposta testada: ", result$transform_label, ".")),
+        tags$li(paste0("Na escala original, a diferenca descritiva entre Q1 e Q5 e ", format_pct(gap), ".")),
+        tags$li("Conclusão: a hipótese de médias iguais entre os quintis foi rejeitada (p < 0,001), indicando diferenças estatisticamente significativas no comprometimento da renda.")
+      )
+    )
+  })
+
+  output$anova_table <- renderTable({
+    format_anova_table(anova_result())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
+
+  output$tukey_table <- renderTable({
+    format_tukey_table(anova_result())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
+
+  output$transform_table <- renderTable({
+    build_transform_comparison(valid_filtered_data())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
+
+  output$residual_plot <- renderPlot({
+    result <- anova_result()
+    plot_data <- data.frame(
+      Ajustado = result$fitted,
+      Residuo = result$residuals
+    )
+
+    ggplot(plot_data, aes(x = Ajustado, y = Residuo)) +
+      geom_hline(yintercept = 0, color = "#d95f4f", linewidth = 0.9) +
+      geom_point(color = "#2f8f68", alpha = 0.28, size = 1.6) +
+      labs(
+        title = "Residuos vs valores ajustados",
+        subtitle = "Busca padroes fortes ou funil de variancia.",
+        x = "Valor ajustado pela ANOVA",
+        y = "Residuo"
+      ) +
+      plot_theme()
+  })
+
+  output$qq_plot <- renderPlot({
+    result <- anova_result()
+    plot_data <- data.frame(Residuo = result$residuals)
+
+    ggplot(plot_data, aes(sample = Residuo)) +
+      stat_qq(color = "#4f79d8", alpha = 0.34, size = 1.5) +
+      stat_qq_line(color = "#d95f4f", linewidth = 1) +
+      labs(
+        title = "QQ-plot dos residuos",
+        subtitle = "Quanto mais perto da linha, mais plausivel a normalidade dos residuos.",
+        x = "Quantis teoricos",
+        y = "Quantis observados"
+      ) +
+      plot_theme()
+  })
+
+  output$diagnostico_texto <- renderUI({
+    result <- anova_result()
+
+    shapiro_text <- ifelse(
+      is.na(result$shapiro_p),
+      "Shapiro-Wilk nao pode ser calculado neste recorte.",
+      paste0("Shapiro-Wilk dos residuos: p = ", format_pvalue(result$shapiro_p), ".")
+    )
+
+    bartlett_text <- ifelse(
+      is.na(result$bartlett_p),
+      "Bartlett nao pode ser calculado neste recorte.",
+      paste0("Bartlett para igualdade de variancias: p = ", format_pvalue(result$bartlett_p), ".")
+    )
+
+    variance_text <- ifelse(
+      is.na(result$sd_ratio),
+      "Razao entre desvios-padrao nao disponivel.",
+      paste0("Razao entre maior e menor desvio-padrao dos grupos: ", format_number_br(result$sd_ratio, 2), ".")
+    )
+
+    boxcox_text <- ifelse(
+      result$method == "boxcox",
+      paste0("A Box-Cox aproximada escolheu lambda = ", format_lambda(result$lambda), "."),
+      "A Box-Cox pode ser comparada na tabela acima para avaliar se melhora os residuos."
+    )
+
+    tagList(
+      tags$ul(
+        class = "insight-list",
+        tags$li(shapiro_text),
+        tags$li(bartlett_text),
+        tags$li(variance_text),
+        tags$li(boxcox_text),
+        tags$li("Com amostras grandes, testes de pressupostos podem acusar pequenas imperfeicoes. Por isso, a interpretacao deve combinar p-valores, graficos dos residuos e clareza da pergunta.")
+      )
+    )
+  })
+
+  output$summary_table <- renderTable({
+    format_summary_table(summary_data())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
+
+  output$quintile_ranges_table <- renderTable({
+    build_quintile_ranges(valid_filtered_data())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
+
+  output$cutoff_table <- renderTable({
+    build_cutoff_table(valid_filtered_data())
+  }, striped = TRUE, bordered = FALSE, spacing = "m")
 }
 
 shinyApp(ui = ui, server = server)
